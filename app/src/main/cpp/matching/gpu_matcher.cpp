@@ -5,12 +5,24 @@
 
 #include <kompute/Kompute.hpp>
 
+// NDK Vulkan wrapper — must call InitVulkan() to dlopen libvulkan.so
+// and load function pointers before any Kompute/Vulkan API calls.
+extern int InitVulkan(void);
+
 namespace onyx {
 namespace matching {
 
 GpuMatcher::GpuMatcher(int max_descriptors)
     : max_desc_(max_descriptors) {
     try {
+        // Load Vulkan function pointers via NDK wrapper before any Vulkan calls.
+        // Without this, vkCreateInstance is a null pointer -> SIGSEGV.
+        if (!InitVulkan()) {
+            LOGW("GpuMatcher: Vulkan not available (InitVulkan failed)");
+            available_ = false;
+            return;
+        }
+
         manager_ = std::make_unique<kp::Manager>();
 
         auto props = manager_->getDeviceProperties();
