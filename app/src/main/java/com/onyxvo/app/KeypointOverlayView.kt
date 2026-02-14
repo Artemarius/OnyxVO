@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.util.AttributeSet
 import android.view.View
+import kotlin.math.max
 
 class KeypointOverlayView @JvmOverloads constructor(
     context: Context,
@@ -23,21 +24,25 @@ class KeypointOverlayView @JvmOverloads constructor(
         strokeWidth = 2f * context.resources.displayMetrics.density
     }
 
-    // Keypoint coords as flat array: [x0, y0, x1, y1, ...]
     private var keypoints: FloatArray? = null
-    // Match lines as flat array: [prev_x, prev_y, curr_x, curr_y, ...]
     private var matchLines: FloatArray? = null
     private var modelWidth = 640
     private var modelHeight = 480
+    private var cameraWidth = 640
+    private var cameraHeight = 480
     private var rotationDegrees = 0
 
-    // Radius in dp, converted to px
     private val radiusPx = 3f * context.resources.displayMetrics.density
 
-    fun updateKeypoints(kpts: FloatArray, modelW: Int, modelH: Int, rotation: Int = 0) {
+    fun updateKeypoints(
+        kpts: FloatArray, modelW: Int, modelH: Int,
+        camW: Int, camH: Int, rotation: Int
+    ) {
         keypoints = kpts
         modelWidth = modelW
         modelHeight = modelH
+        cameraWidth = camW
+        cameraHeight = camH
         rotationDegrees = rotation
         postInvalidate()
     }
@@ -53,31 +58,74 @@ class KeypointOverlayView @JvmOverloads constructor(
         postInvalidate()
     }
 
-    // Transform model-space (x, y) to view-space accounting for sensor rotation.
-    // CameraX ImageProxy reports rotation needed to match display orientation.
-    // Model processes the raw sensor image (landscape), but PreviewView auto-rotates.
+    // Transform model-space (mx, my) to view-space, matching PreviewView FILL_CENTER.
+    //
+    // Pipeline:
+    // 1. Model coords -> normalized camera coords (undo the non-uniform resize)
+    //    norm_x = mx / modelWidth, norm_y = my / modelHeight   (both in 0..1)
+    // 2. Apply sensor rotation (90/180/270) to get display-oriented coords
+    // 3. Apply PreviewView FILL_CENTER scaling (center-crop) to get view pixels
     private fun transformX(mx: Float, my: Float): Float {
-        return when (rotationDegrees) {
-            90 -> (modelHeight - my) / modelHeight * width
-            180 -> (modelWidth - mx) / modelWidth * width
-            270 -> my / modelHeight * width
-            else -> mx / modelWidth * width
+        // Step 1: normalize to camera space (0..1)
+        val normCamX = mx / modelWidth
+        val normCamY = my / modelHeight
+
+        // Step 2: apply rotation to get display-oriented normalized coords
+        val imgNormX = when (rotationDegrees) {
+            90 -> 1f - normCamY
+            180 -> 1f - normCamX
+            270 -> normCamY
+            else -> normCamX
         }
+
+        // Step 3: FILL_CENTER mapping
+        // Rotated image dimensions
+        val imgW: Float
+        val imgH: Float
+        if (rotationDegrees == 90 || rotationDegrees == 270) {
+            imgW = cameraHeight.toFloat()
+            imgH = cameraWidth.toFloat()
+        } else {
+            imgW = cameraWidth.toFloat()
+            imgH = cameraHeight.toFloat()
+        }
+
+        val scale = max(width / imgW, height / imgH)
+        val offsetX = (width - imgW * scale) / 2f
+
+        return imgNormX * imgW * scale + offsetX
     }
 
     private fun transformY(mx: Float, my: Float): Float {
-        return when (rotationDegrees) {
-            90 -> mx / modelWidth * height
-            180 -> (modelHeight - my) / modelHeight * height
-            270 -> (modelWidth - mx) / modelWidth * height
-            else -> my / modelHeight * height
+        val normCamX = mx / modelWidth
+        val normCamY = my / modelHeight
+
+        val imgNormY = when (rotationDegrees) {
+            90 -> normCamX
+            180 -> 1f - normCamY
+            270 -> 1f - normCamX
+            else -> normCamY
         }
+
+        val imgW: Float
+        val imgH: Float
+        if (rotationDegrees == 90 || rotationDegrees == 270) {
+            imgW = cameraHeight.toFloat()
+            imgH = cameraWidth.toFloat()
+        } else {
+            imgW = cameraWidth.toFloat()
+            imgH = cameraHeight.toFloat()
+        }
+
+        val scale = max(width / imgW, height / imgH)
+        val offsetY = (height - imgH * scale) / 2f
+
+        return imgNormY * imgH * scale + offsetY
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        // Draw match lines first (underneath keypoints)
         val lines = matchLines
         if (lines != null && lines.size >= 4) {
             var i = 0
@@ -91,7 +139,6 @@ class KeypointOverlayView @JvmOverloads constructor(
             }
         }
 
-        // Draw keypoints on top
         val kpts = keypoints ?: return
         if (kpts.isEmpty()) return
 
