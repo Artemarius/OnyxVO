@@ -1,5 +1,6 @@
 package com.onyxvo.app
 
+import android.content.res.AssetManager
 import java.nio.ByteBuffer
 
 class NativeBridge {
@@ -14,7 +15,7 @@ class NativeBridge {
     external fun nativeGetVersion(): String
 
     // Phase 2: Preprocessing
-    // Returns FloatArray [copy_us, resize_us, normalize_us, total_us] or null on error
+    // Returns FloatArray [resize_us, normalize_us, total_us] or null on error
     external fun nativePreprocessFrame(
         yPlaneBuffer: ByteBuffer,
         width: Int,
@@ -36,4 +37,29 @@ class NativeBridge {
     // Phase 2: NEON vs scalar validation (no camera needed — uses synthetic data)
     // Returns FloatArray [resize_max_err, normalize_max_err, pipeline_max_err, all_passed]
     external fun nativeValidatePreprocessing(): FloatArray?
+
+    // Phase 3: Initialize XFeat model
+    // Returns true on success
+    external fun nativeInitModel(assetManager: AssetManager, useInt8: Boolean): Boolean
+
+    // Phase 3: Process frame (preprocess + feature extraction)
+    // Returns FloatArray [preprocess_us, inference_us, kp_count, x0, y0, x1, y1, ...] or null
+    external fun nativeProcessFrame(
+        yPlaneBuffer: ByteBuffer,
+        width: Int,
+        height: Int,
+        rowStride: Int,
+        useNeon: Boolean
+    ): FloatArray?
+
+    // Phase 3: Switch between FP32 and INT8 models
+    external fun nativeSwitchModel(assetManager: AssetManager, useInt8: Boolean): Boolean
+
+    // Phase 3: Inference benchmark (FP32 vs INT8)
+    // Returns FloatArray [fp32_avg_us, int8_avg_us, speedup, fp32_kp_count, int8_kp_count]
+    external fun nativeBenchmarkInference(assetManager: AssetManager, iterations: Int): FloatArray?
+
+    // Phase 3: Inference validation smoke test
+    // Returns FloatArray [fp32_kp_count, int8_kp_count, diff_pct, passed]
+    external fun nativeValidateInference(assetManager: AssetManager): FloatArray?
 }

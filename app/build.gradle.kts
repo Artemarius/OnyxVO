@@ -3,6 +3,26 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Resolve ONNX Runtime native library from the AAR for CMake linking.
+// The AAR bundles jni/<abi>/libonnxruntime.so. We extract it to a stable
+// directory outside build/ so it survives `clean`.
+val ortNativeDir: String by lazy {
+    val ortConfig = configurations.detachedConfiguration(
+        dependencies.create("com.microsoft.onnxruntime:onnxruntime-android:1.20.0@aar")
+    )
+    val aarFile = ortConfig.resolve().first()
+    val extractDir = file("${projectDir}/.ort-native")
+    val targetSo = File(extractDir, "jni/arm64-v8a/libonnxruntime.so")
+    if (!targetSo.exists()) {
+        copy {
+            from(zipTree(aarFile))
+            into(extractDir)
+            include("jni/arm64-v8a/**")
+        }
+    }
+    "${extractDir.absolutePath}/jni/arm64-v8a".replace("\\", "/")
+}
+
 android {
     namespace = "com.onyxvo.app"
     compileSdk = 34
@@ -24,6 +44,7 @@ android {
             cmake {
                 cppFlags += "-std=c++17"
                 arguments += "-DANDROID_STL=c++_shared"
+                arguments += "-DORT_LIB_DIR=$ortNativeDir"
             }
         }
     }
@@ -72,6 +93,9 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraxVersion")
 
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+
+    // ONNX Runtime for on-device ML inference (XFeat feature extraction)
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test:runner:1.5.2")

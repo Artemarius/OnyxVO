@@ -29,13 +29,20 @@ class CameraManager(
         val resizeTimeUs: Float,
         val normalizeTimeUs: Float,
         val totalTimeUs: Float,
-        val useNeon: Boolean
+        val useNeon: Boolean,
+        // Phase 3 additions
+        val inferenceTimeUs: Float = 0f,
+        val keypointCount: Int = 0,
+        val keypointCoords: FloatArray = FloatArray(0)
     )
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     @Volatile
     var useNeon: Boolean = true
+
+    @Volatile
+    var modelReady: Boolean = false
 
     @Volatile
     var benchmarkRequested: Boolean = false
@@ -88,13 +95,12 @@ class CameraManager(
             val yBuffer = yPlane.buffer
             val rowStride = yPlane.rowStride
 
-            // Rewind to ensure native reads from position 0
             yBuffer.rewind()
 
             val width = imageProxy.width
             val height = imageProxy.height
 
-            // Run benchmark if requested (one-shot, blocks the analysis thread)
+            // Run preprocessing benchmark if requested (one-shot)
             if (benchmarkRequested) {
                 benchmarkRequested = false
                 val result = nativeBridge.nativeBenchmarkPreprocessing(
@@ -103,27 +109,61 @@ class CameraManager(
                 if (result != null) {
                     onBenchmarkResult?.invoke(result)
                 }
-                // Re-rewind after benchmark consumed the buffer
                 yBuffer.rewind()
             }
 
-            // Normal per-frame preprocessing
-            val timing = nativeBridge.nativePreprocessFrame(
-                yBuffer, width, height, rowStride, useNeon
-            )
-
-            if (timing != null) {
-                onFrameProcessed(
-                    FrameResult(
-                        width = width,
-                        height = height,
-                        format = imageProxy.format,
-                        resizeTimeUs = timing[0],
-                        normalizeTimeUs = timing[1],
-                        totalTimeUs = timing[2],
-                        useNeon = useNeon
-                    )
+            if (modelReady) {
+                // Phase 3: Full pipeline (preprocess + feature extraction)
+                val result = nativeBridge.nativeProcessFrame(
+                    yBuffer, width, height, rowStride, useNeon
                 )
+
+                if (result != null && result.size >= 3) {
+                    val preprocessUs = result[0]
+                    val inferenceUs = result[1]
+                    val kpCount = result[2].toInt()
+
+                    // Extract keypoint coordinates (packed as x0,y0,x1,y1,...)
+                    val kpCoords = if (kpCount > 0 && result.size >= 3 + kpCount * 2) {
+                        result.copyOfRange(3, 3 + kpCount * 2)
+                    } else {
+                        FloatArray(0)
+                    }
+
+                    onFrameProcessed(
+                        FrameResult(
+                            width = width,
+                            height = height,
+                            format = imageProxy.format,
+                            resizeTimeUs = preprocessUs,  // total preprocess
+                            normalizeTimeUs = 0f,
+                            totalTimeUs = preprocessUs + inferenceUs,
+                            useNeon = useNeon,
+                            inferenceTimeUs = inferenceUs,
+                            keypointCount = kpCount,
+                            keypointCoords = kpCoords
+                        )
+                    )
+                }
+            } else {
+                // Fallback: preprocessing only (Phase 2 behavior)
+                val timing = nativeBridge.nativePreprocessFrame(
+                    yBuffer, width, height, rowStride, useNeon
+                )
+
+                if (timing != null) {
+                    onFrameProcessed(
+                        FrameResult(
+                            width = width,
+                            height = height,
+                            format = imageProxy.format,
+                            resizeTimeUs = timing[0],
+                            normalizeTimeUs = timing[1],
+                            totalTimeUs = timing[2],
+                            useNeon = useNeon
+                        )
+                    )
+                }
             }
         } finally {
             imageProxy.close()

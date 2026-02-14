@@ -171,4 +171,4 @@ Claude Code should implement ONE phase at a time. Do not pull in components from
 - C: drive has limited space — all SDK/build artifacts go on D:
 - No standalone JDK installed; using Android Studio's bundled JBR 21
 - Test device: Samsung Galaxy S21 via USB debugging
-- Project status: Phase 2 complete (NEON preprocessing: bilinear resize, normalize, benchmark, debug overlay)
+- Project status: Phase 3 complete (XFeat ONNX integration: backbone-only export, FP32+INT8, keypoint overlay, inference benchmark)

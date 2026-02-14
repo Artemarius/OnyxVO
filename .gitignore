@@ -24,6 +24,10 @@ obj/
 *.o
 *.so
 
+# Extracted ONNX Runtime native libs (re-extracted from AAR)
+.ort-native/
+app/.ort-native/
+
 # CMake
 CMakeFiles/
 cmake_install.cmake
@@ -33,9 +37,11 @@ CMakeCache.txt
 # Keep .comp source, ignore compiled .spv if generated at build time
 # shaders/*.spv
 
-# ONNX models (large files — use Git LFS or download script)
-# Uncomment if using Git LFS:
-# app/src/main/assets/*.onnx
+# ONNX models tracked via Git LFS (see .gitattributes)
+
+# Python virtual environments
+.venv/
+scripts/.venv/
 
 # Private planning docs
 PROJECT.md

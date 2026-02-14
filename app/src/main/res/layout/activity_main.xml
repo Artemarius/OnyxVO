@@ -15,7 +15,17 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Debug overlay: preprocessing timing stats -->
+    <!-- Keypoint visualization overlay (stacked on top of camera preview) -->
+    <com.onyxvo.app.KeypointOverlayView
+        android:id="@+id/keypointOverlay"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toBottomOf="@id/cameraPreview"
+        app:layout_constraintEnd_toEndOf="@id/cameraPreview"
+        app:layout_constraintStart_toStartOf="@id/cameraPreview"
+        app:layout_constraintTop_toTopOf="@id/cameraPreview" />
+
+    <!-- Debug overlay: timing stats -->
     <TextView
         android:id="@+id/debugOverlay"
         android:layout_width="wrap_content"
@@ -44,6 +54,21 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- FP32 / INT8 model toggle -->
+    <Button
+        android:id="@+id/toggleModelButton"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="16dp"
+        android:backgroundTint="#CC9C27B0"
+        android:minWidth="80dp"
+        android:text="FP32"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/toggleNeonButton" />
+
     <!-- Benchmark button -->
     <Button
         android:id="@+id/benchmarkButton"
@@ -57,7 +82,7 @@
         android:textColor="@android:color/white"
         android:textSize="12sp"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/toggleNeonButton" />
+        app:layout_constraintTop_toBottomOf="@id/toggleModelButton" />
 
     <!-- Benchmark result display -->
     <TextView
