@@ -1,0 +1,56 @@
+# Android / Gradle
+*.iml
+.gradle/
+/local.properties
+/.idea/
+/build/
+/app/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Kotlin
+*.class
+
+# Android SDK
+/sdk/
+
+# NDK build artifacts
+obj/
+*.o
+*.so
+
+# CMake
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+
+# SPIR-V compiled shaders (regenerated from GLSL)
+# Keep .comp source, ignore compiled .spv if generated at build time
+# shaders/*.spv
+
+# ONNX models (large files — use Git LFS or download script)
+# Uncomment if using Git LFS:
+# app/src/main/assets/*.onnx
+
+# Private planning docs
+PROJECT.md
+
+# AI/development config
+.claude/
+.mcp/
+*.skills
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
