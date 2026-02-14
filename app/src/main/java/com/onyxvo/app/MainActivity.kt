@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     private var avgTotalUs = 0f
     private var avgInferenceUs = 0f
     private var avgMatchingUs = 0f
+    private var avgPoseUs = 0f
     private var useInt8 = false
     private var modelLoaded = false
     private var matcherReady = false
@@ -91,6 +92,12 @@ class MainActivity : AppCompatActivity() {
             val effectiveGpu = newUseGpu && gpuMatcherAvailable
             nativeBridge.nativeSetMatcherUseGpu(effectiveGpu)
             binding.toggleMatcherButton.text = if (effectiveGpu) "GPU" else "CPU"
+        }
+
+        binding.resetButton.setOnClickListener {
+            nativeBridge.nativeResetTrajectory()
+            binding.trajectoryView.clear()
+            Log.i(TAG, "Trajectory reset by user")
         }
 
         binding.benchmarkButton.setOnClickListener {
@@ -180,9 +187,11 @@ class MainActivity : AppCompatActivity() {
                     binding.debugOverlay.text = "OnyxVO v${nativeBridge.nativeGetVersion()}\nModel load failed"
                 }
             }
-            // Initialize matcher after model
+            // Initialize matcher and VO after model
             if (success) {
                 initMatcher()
+                nativeBridge.nativeInitVO()
+                Log.i(TAG, "VO initialized")
             }
         }.start()
     }
@@ -234,6 +243,16 @@ class MainActivity : AppCompatActivity() {
                             else avgMatchingUs * (1 - SMOOTHING) + result.matchingTimeUs * SMOOTHING
         }
 
+        if (result.poseTimeUs > 0) {
+            avgPoseUs = if (frameCount == 1L) result.poseTimeUs
+                        else avgPoseUs * (1 - SMOOTHING) + result.poseTimeUs * SMOOTHING
+        }
+
+        // Update trajectory view
+        if (result.trajectoryXZ.isNotEmpty()) {
+            binding.trajectoryView.updateTrajectory(result.trajectoryXZ)
+        }
+
         // Update keypoint overlay
         if (result.keypointCoords.isNotEmpty()) {
             binding.keypointOverlay.updateKeypoints(result.keypointCoords, 640, 480)
@@ -267,15 +286,20 @@ class MainActivity : AppCompatActivity() {
                 append(String.format("Preproc: %.1f ms | Infer: %.1f ms\n",
                     result.resizeTimeUs / 1000, result.inferenceTimeUs / 1000))
                 if (result.matchingTimeUs > 0) {
-                    append(String.format("Match: %.1f ms | Total: %.1f ms\n",
-                        result.matchingTimeUs / 1000, result.totalTimeUs / 1000))
-                } else {
-                    append(String.format("Total: %.1f ms (avg %.1f ms)\n",
-                        result.totalTimeUs / 1000, avgTotalUs / 1000))
+                    append(String.format("Match: %.1f ms | Pose: %.1f ms\n",
+                        result.matchingTimeUs / 1000, result.poseTimeUs / 1000))
                 }
-                append("Keypoints: ${result.keypointCount}")
+                append(String.format("Total: %.1f ms (avg %.1f ms)\n",
+                    result.totalTimeUs / 1000, avgTotalUs / 1000))
+                append("KP: ${result.keypointCount}")
                 if (result.matchCount > 0) {
-                    append(" | Matches: ${result.matchCount}")
+                    append(" | Match: ${result.matchCount}")
+                }
+                if (result.inlierCount > 0) {
+                    append(" | Inlier: ${result.inlierCount}")
+                }
+                if (result.keyframeCount > 0) {
+                    append("\nKeyframes: ${result.keyframeCount}")
                 }
             } else {
                 append(String.format("Resize: %.0f us | Norm: %.0f us\n",

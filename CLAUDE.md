@@ -178,4 +178,4 @@ Claude Code should implement ONE phase at a time. Do not pull in components from
 - No standalone JDK installed; using Android Studio's bundled JBR 21
 - Test device: Samsung Galaxy S21 via USB debugging
 - NDK 25.1.8937393 required for Kompute build (NDK wrapper needs `sources/third_party/vulkan/` path)
-- Project status: Phase 4 complete (Kompute descriptor matching with GPU/CPU, match visualization, benchmarks)
+- Project status: Phase 5 complete (pose estimation via normalized 8-point + RANSAC, trajectory accumulation, 2D trajectory view)

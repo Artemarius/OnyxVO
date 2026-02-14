@@ -64,6 +64,12 @@ class NativeBridge {
     // Returns FloatArray [fp32_kp_count, int8_kp_count, diff_pct, passed]
     external fun nativeValidateInference(assetManager: AssetManager): FloatArray?
 
+    // Phase 5: Initialize visual odometry (pose estimator + trajectory)
+    external fun nativeInitVO()
+
+    // Phase 5: Reset trajectory and clear previous frame
+    external fun nativeResetTrajectory()
+
     // Phase 4: Initialize matcher (GPU + CPU fallback)
     // Returns true if GPU matcher is available, false if CPU-only
     external fun nativeInitMatcher(): Boolean

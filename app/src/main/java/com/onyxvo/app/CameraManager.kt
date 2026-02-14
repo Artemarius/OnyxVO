@@ -37,7 +37,12 @@ class CameraManager(
         // Phase 4 additions
         val matchingTimeUs: Float = 0f,
         val matchCount: Int = 0,
-        val matchLines: FloatArray = FloatArray(0)
+        val matchLines: FloatArray = FloatArray(0),
+        // Phase 5 additions
+        val poseTimeUs: Float = 0f,
+        val inlierCount: Int = 0,
+        val keyframeCount: Int = 0,
+        val trajectoryXZ: FloatArray = FloatArray(0)
     )
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -122,15 +127,19 @@ class CameraManager(
                     yBuffer, width, height, rowStride, useNeon
                 )
 
-                if (result != null && result.size >= 5) {
+                if (result != null && result.size >= 9) {
                     val preprocessUs = result[0]
                     val inferenceUs = result[1]
                     val matchingUs = result[2]
-                    val kpCount = result[3].toInt()
-                    val matchCount = result[4].toInt()
+                    val poseUs = result[3]
+                    val kpCount = result[4].toInt()
+                    val matchCount = result[5].toInt()
+                    val inlierCount = result[6].toInt()
+                    val keyframeCount = result[7].toInt()
+                    val trajectoryCount = result[8].toInt()
 
                     // Extract keypoint coordinates (packed as x0,y0,x1,y1,...)
-                    val kpStart = 5
+                    val kpStart = 9
                     val kpEnd = kpStart + kpCount * 2
                     val kpCoords = if (kpCount > 0 && result.size >= kpEnd) {
                         result.copyOfRange(kpStart, kpEnd)
@@ -147,21 +156,34 @@ class CameraManager(
                         FloatArray(0)
                     }
 
+                    // Extract trajectory XZ positions
+                    val trajStart = matchEnd
+                    val trajEnd = trajStart + trajectoryCount * 2
+                    val trajectoryXZ = if (trajectoryCount > 0 && result.size >= trajEnd) {
+                        result.copyOfRange(trajStart, trajEnd)
+                    } else {
+                        FloatArray(0)
+                    }
+
                     onFrameProcessed(
                         FrameResult(
                             width = width,
                             height = height,
                             format = imageProxy.format,
-                            resizeTimeUs = preprocessUs,  // total preprocess
+                            resizeTimeUs = preprocessUs,
                             normalizeTimeUs = 0f,
-                            totalTimeUs = preprocessUs + inferenceUs + matchingUs,
+                            totalTimeUs = preprocessUs + inferenceUs + matchingUs + poseUs,
                             useNeon = useNeon,
                             inferenceTimeUs = inferenceUs,
                             keypointCount = kpCount,
                             keypointCoords = kpCoords,
                             matchingTimeUs = matchingUs,
                             matchCount = matchCount,
-                            matchLines = matchLines
+                            matchLines = matchLines,
+                            poseTimeUs = poseUs,
+                            inlierCount = inlierCount,
+                            keyframeCount = keyframeCount,
+                            trajectoryXZ = trajectoryXZ
                         )
                     )
                 }

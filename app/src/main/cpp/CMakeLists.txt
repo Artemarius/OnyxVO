@@ -158,6 +158,8 @@ add_library(onyx_vo SHARED
     feature/xfeat_extractor.cpp
     matching/cpu_matcher.cpp
     matching/gpu_matcher.cpp
+    vo/pose_estimator.cpp
+    vo/trajectory.cpp
 )
 
 add_dependencies(onyx_vo compile_shaders)

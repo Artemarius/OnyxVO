@@ -11,8 +11,10 @@
 #include "feature/xfeat_extractor.h"
 #include "matching/gpu_matcher.h"
 #include "matching/cpu_matcher.h"
+#include "vo/pose_estimator.h"
+#include "vo/trajectory.h"
 
-#define ONYX_VO_VERSION "0.4.0-phase4"
+#define ONYX_VO_VERSION "0.5.0-phase5"
 
 namespace {
 
@@ -57,6 +59,15 @@ struct MatchState {
 };
 
 MatchState g_match;
+
+// Phase 5: Visual odometry state
+struct VOState {
+    std::unique_ptr<onyx::vo::PoseEstimator> estimator;
+    onyx::vo::Trajectory trajectory;
+    bool initialized = false;
+};
+
+VOState g_vo;
 
 } // anonymous namespace
 
@@ -386,16 +397,21 @@ Java_com_onyxvo_app_NativeBridge_nativeInitMatcher(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3+4: Process frame (preprocess + extract + match)
+// Phase 3+4+5: Process frame (preprocess + extract + match + pose estimation)
 //
 // Returns FloatArray:
 //   [0] preprocess_us
 //   [1] inference_us
 //   [2] matching_us
-//   [3] keypoint_count (N)
-//   [4] match_count (M)
-//   [5..5+2*N-1]         keypoint coordinates (x0, y0, x1, y1, ...)
-//   [5+2*N..5+2*N+4*M-1] match lines (prev_x, prev_y, curr_x, curr_y per match)
+//   [3] pose_us
+//   [4] kp_count (N)
+//   [5] match_count (M)
+//   [6] inlier_count
+//   [7] keyframe_count
+//   [8] trajectory_count (T)
+//   [9..9+2N)              keypoint coordinates (x0, y0, x1, y1, ...)
+//   [9+2N..9+2N+4M)        match lines (prev_x, prev_y, curr_x, curr_y per match)
+//   [9+2N+4M..9+2N+4M+2T)  trajectory XZ positions (x0, z0, x1, z1, ...)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jfloatArray JNICALL
@@ -453,12 +469,36 @@ Java_com_onyxvo_app_NativeBridge_nativeProcessFrame(
         }
     }
 
+    // Step 4: Pose estimation (if VO initialized and we have matches)
+    double pose_us = 0.0;
+    int inlier_count = 0;
+
+    if (g_vo.initialized && g_vo.estimator && !matches.empty()) {
+        // Build matched point vectors
+        std::vector<Eigen::Vector2f> matched_pts1(matches.size());
+        std::vector<Eigen::Vector2f> matched_pts2(matches.size());
+        for (size_t i = 0; i < matches.size(); ++i) {
+            matched_pts1[i] = g_match.prev_features.keypoints[matches[i].idx1];
+            matched_pts2[i] = features.keypoints[matches[i].idx2];
+        }
+
+        auto pose_result = g_vo.estimator->estimatePose(matched_pts1, matched_pts2);
+        pose_us = pose_result.estimation_us;
+        inlier_count = pose_result.inlier_count;
+
+        if (pose_result.valid) {
+            g_vo.trajectory.update(pose_result.R, pose_result.t);
+            g_vo.trajectory.incrementKeyframeCount();
+        }
+    }
+
     int n = features.count;
     int m = static_cast<int>(matches.size());
+    const auto& positions = g_vo.trajectory.positions();
+    int t_count = static_cast<int>(positions.size());
 
-    // Pack result: [preprocess_us, inference_us, matching_us, kp_count, match_count,
-    //               kp_coords..., match_lines...]
-    int result_size = 5 + n * 2 + m * 4;
+    // Pack result: 9-field header + keypoints + match lines + trajectory XZ
+    int result_size = 9 + n * 2 + m * 4 + t_count * 2;
     jfloatArray result = env->NewFloatArray(result_size);
     if (!result) return nullptr;
 
@@ -466,23 +506,34 @@ Java_com_onyxvo_app_NativeBridge_nativeProcessFrame(
     data[0] = static_cast<float>(timing.total_us);
     data[1] = static_cast<float>(features.inference_us);
     data[2] = static_cast<float>(matching_us);
-    data[3] = static_cast<float>(n);
-    data[4] = static_cast<float>(m);
+    data[3] = static_cast<float>(pose_us);
+    data[4] = static_cast<float>(n);
+    data[5] = static_cast<float>(m);
+    data[6] = static_cast<float>(inlier_count);
+    data[7] = static_cast<float>(g_vo.trajectory.keyframeCount());
+    data[8] = static_cast<float>(t_count);
 
     // Keypoint coordinates
     for (int i = 0; i < n; ++i) {
-        data[5 + i * 2]     = features.keypoints[i].x();
-        data[5 + i * 2 + 1] = features.keypoints[i].y();
+        data[9 + i * 2]     = features.keypoints[i].x();
+        data[9 + i * 2 + 1] = features.keypoints[i].y();
     }
 
     // Match lines: (prev_x, prev_y, curr_x, curr_y) per match
-    int match_offset = 5 + n * 2;
+    int match_offset = 9 + n * 2;
     for (int i = 0; i < m; ++i) {
         const auto& match = matches[i];
         data[match_offset + i * 4]     = g_match.prev_features.keypoints[match.idx1].x();
         data[match_offset + i * 4 + 1] = g_match.prev_features.keypoints[match.idx1].y();
         data[match_offset + i * 4 + 2] = features.keypoints[match.idx2].x();
         data[match_offset + i * 4 + 3] = features.keypoints[match.idx2].y();
+    }
+
+    // Trajectory XZ positions (top-down view: X = right, Z = forward)
+    int traj_offset = match_offset + m * 4;
+    for (int i = 0; i < t_count; ++i) {
+        data[traj_offset + i * 2]     = static_cast<float>(positions[i].x());
+        data[traj_offset + i * 2 + 1] = static_cast<float>(positions[i].z());
     }
 
     env->SetFloatArrayRegion(result, 0, result_size, data.get());
@@ -492,6 +543,44 @@ Java_com_onyxvo_app_NativeBridge_nativeProcessFrame(
     g_match.has_prev_frame = true;
 
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: Visual odometry initialization
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeInitVO(
+    JNIEnv* /* env */, jobject /* thiz */) {
+
+    // Hardcoded intrinsics for 640x480 model resolution.
+    // Approximation suitable for most smartphone cameras.
+    onyx::vo::CameraIntrinsics K;
+    K.fx = 525.0;
+    K.fy = 525.0;
+    K.cx = 320.0;
+    K.cy = 240.0;
+
+    onyx::vo::PoseEstimator::Config config;
+    config.ransac_iterations = 200;
+    config.inlier_threshold_px = 1.5;
+    config.min_inliers = 15;
+
+    g_vo.estimator = std::make_unique<onyx::vo::PoseEstimator>(K, config);
+    g_vo.trajectory.reset();
+    g_vo.initialized = true;
+
+    LOGI("VO initialized: fx=%.0f fy=%.0f cx=%.0f cy=%.0f",
+         K.fx, K.fy, K.cx, K.cy);
+}
+
+JNIEXPORT void JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeResetTrajectory(
+    JNIEnv* /* env */, jobject /* thiz */) {
+
+    g_vo.trajectory.reset();
+    g_match.has_prev_frame = false;
+    LOGI("Trajectory reset");
 }
 
 // ---------------------------------------------------------------------------
