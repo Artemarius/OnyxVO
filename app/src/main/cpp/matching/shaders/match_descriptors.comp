@@ -1,0 +1,54 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PushConstants {
+    uint n1;  // number of descriptors in set 1
+    uint n2;  // number of descriptors in set 2
+};
+
+// Descriptor buffers: flat float arrays, 64 floats per descriptor
+layout(set = 0, binding = 0) readonly buffer Desc1 { float desc1[]; };
+layout(set = 0, binding = 1) readonly buffer Desc2 { float desc2[]; };
+
+// Output: per-descriptor in set 1
+layout(set = 0, binding = 2) writeonly buffer MatchIndices   { int   match_indices[];   };
+layout(set = 0, binding = 3) writeonly buffer MatchDistances { float match_distances[];  };
+layout(set = 0, binding = 4) writeonly buffer SecondDists    { float second_distances[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n1) return;
+
+    uint base1 = idx * 64u;
+
+    float best_dist   = 3.402823466e+38;  // FLT_MAX
+    float second_dist = 3.402823466e+38;
+    int   best_idx    = -1;
+
+    for (uint j = 0u; j < n2; ++j) {
+        uint base2 = j * 64u;
+        float dist = 0.0;
+
+        // Unrolled 4-wide accumulation for GPU SIMD
+        for (uint k = 0u; k < 64u; k += 4u) {
+            float d0 = desc1[base1 + k]     - desc2[base2 + k];
+            float d1 = desc1[base1 + k + 1u] - desc2[base2 + k + 1u];
+            float d2 = desc1[base1 + k + 2u] - desc2[base2 + k + 2u];
+            float d3 = desc1[base1 + k + 3u] - desc2[base2 + k + 3u];
+            dist += d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3;
+        }
+
+        if (dist < best_dist) {
+            second_dist = best_dist;
+            best_dist = dist;
+            best_idx = int(j);
+        } else if (dist < second_dist) {
+            second_dist = dist;
+        }
+    }
+
+    match_indices[idx]   = best_idx;
+    match_distances[idx] = best_dist;
+    second_distances[idx] = second_dist;
+}

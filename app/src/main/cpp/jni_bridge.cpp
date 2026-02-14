@@ -4,12 +4,15 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <set>
 #include <android/asset_manager_jni.h>
 #include "utils/android_log.h"
 #include "preprocessing/neon_ops.h"
 #include "feature/xfeat_extractor.h"
+#include "matching/gpu_matcher.h"
+#include "matching/cpu_matcher.h"
 
-#define ONYX_VO_VERSION "0.3.0-phase3"
+#define ONYX_VO_VERSION "0.4.0-phase4"
 
 namespace {
 
@@ -40,6 +43,20 @@ constexpr float kDefaultStd  = 255.0f;
 
 // Phase 3: XFeat extractor
 std::unique_ptr<onyx::feature::XFeatExtractor> g_extractor;
+
+// Phase 4: Matching state
+struct MatchState {
+    std::unique_ptr<onyx::matching::GpuMatcher> gpu_matcher;
+    onyx::matching::CpuMatcher cpu_matcher;
+    bool use_gpu = true;
+    bool initialized = false;
+
+    // Previous frame features for frame-to-frame matching
+    onyx::feature::FeatureResult prev_features;
+    bool has_prev_frame = false;
+};
+
+MatchState g_match;
 
 } // anonymous namespace
 
@@ -344,13 +361,41 @@ Java_com_onyxvo_app_NativeBridge_nativeInitModel(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: Process frame (preprocess + extract features)
+// Phase 4: Matcher initialization
+// ---------------------------------------------------------------------------
+
+JNIEXPORT jboolean JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeInitMatcher(
+    JNIEnv* /* env */, jobject /* thiz */) {
+
+    try {
+        g_match.gpu_matcher = std::make_unique<onyx::matching::GpuMatcher>(600);
+        g_match.use_gpu = g_match.gpu_matcher->isAvailable();
+        g_match.initialized = true;
+        g_match.has_prev_frame = false;
+
+        LOGI("Matcher init: GPU=%s", g_match.use_gpu ? "yes" : "no (CPU fallback)");
+        return g_match.use_gpu ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception& e) {
+        LOGE("nativeInitMatcher failed: %s", e.what());
+        g_match.use_gpu = false;
+        g_match.initialized = true;  // CPU matcher is always available
+        g_match.has_prev_frame = false;
+        return JNI_FALSE;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3+4: Process frame (preprocess + extract + match)
 //
 // Returns FloatArray:
 //   [0] preprocess_us
 //   [1] inference_us
-//   [2] keypoint_count
-//   [3..3+2*N-1] keypoint coordinates (x0, y0, x1, y1, ...)
+//   [2] matching_us
+//   [3] keypoint_count (N)
+//   [4] match_count (M)
+//   [5..5+2*N-1]         keypoint coordinates (x0, y0, x1, y1, ...)
+//   [5+2*N..5+2*N+4*M-1] match lines (prev_x, prev_y, curr_x, curr_y per match)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jfloatArray JNICALL
@@ -388,24 +433,83 @@ Java_com_onyxvo_app_NativeBridge_nativeProcessFrame(
     auto features = g_extractor->extract(
         g_preprocess.output.get(), kTargetWidth, kTargetHeight);
 
-    // Pack result: [preprocess_us, inference_us, kp_count, x0, y0, x1, y1, ...]
+    // Step 3: Matching (if we have a previous frame and matcher is initialized)
+    double matching_us = 0.0;
+    std::vector<onyx::matching::Match> matches;
+
+    if (g_match.initialized && g_match.has_prev_frame &&
+        features.count > 0 && g_match.prev_features.count > 0) {
+
+        if (g_match.use_gpu && g_match.gpu_matcher && g_match.gpu_matcher->isAvailable()) {
+            matches = g_match.gpu_matcher->match(
+                g_match.prev_features.descriptors, g_match.prev_features.count,
+                features.descriptors, features.count,
+                0.8f, &matching_us);
+        } else {
+            matches = g_match.cpu_matcher.match(
+                g_match.prev_features.descriptors, g_match.prev_features.count,
+                features.descriptors, features.count,
+                0.8f, &matching_us);
+        }
+    }
+
     int n = features.count;
-    int result_size = 3 + n * 2;
+    int m = static_cast<int>(matches.size());
+
+    // Pack result: [preprocess_us, inference_us, matching_us, kp_count, match_count,
+    //               kp_coords..., match_lines...]
+    int result_size = 5 + n * 2 + m * 4;
     jfloatArray result = env->NewFloatArray(result_size);
     if (!result) return nullptr;
 
     auto data = std::make_unique<float[]>(result_size);
     data[0] = static_cast<float>(timing.total_us);
     data[1] = static_cast<float>(features.inference_us);
-    data[2] = static_cast<float>(n);
+    data[2] = static_cast<float>(matching_us);
+    data[3] = static_cast<float>(n);
+    data[4] = static_cast<float>(m);
 
+    // Keypoint coordinates
     for (int i = 0; i < n; ++i) {
-        data[3 + i * 2]     = features.keypoints[i].x();
-        data[3 + i * 2 + 1] = features.keypoints[i].y();
+        data[5 + i * 2]     = features.keypoints[i].x();
+        data[5 + i * 2 + 1] = features.keypoints[i].y();
+    }
+
+    // Match lines: (prev_x, prev_y, curr_x, curr_y) per match
+    int match_offset = 5 + n * 2;
+    for (int i = 0; i < m; ++i) {
+        const auto& match = matches[i];
+        data[match_offset + i * 4]     = g_match.prev_features.keypoints[match.idx1].x();
+        data[match_offset + i * 4 + 1] = g_match.prev_features.keypoints[match.idx1].y();
+        data[match_offset + i * 4 + 2] = features.keypoints[match.idx2].x();
+        data[match_offset + i * 4 + 3] = features.keypoints[match.idx2].y();
     }
 
     env->SetFloatArrayRegion(result, 0, result_size, data.get());
+
+    // Cache current features for next frame matching
+    g_match.prev_features = std::move(features);
+    g_match.has_prev_frame = true;
+
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: Toggle GPU/CPU matching
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeSetMatcherUseGpu(
+    JNIEnv* /* env */, jobject /* thiz */, jboolean use_gpu) {
+
+    if (!g_match.initialized) {
+        LOGW("nativeSetMatcherUseGpu: matcher not initialized");
+        return;
+    }
+
+    bool can_use_gpu = g_match.gpu_matcher && g_match.gpu_matcher->isAvailable();
+    g_match.use_gpu = use_gpu && can_use_gpu;
+    LOGI("Matcher mode: %s", g_match.use_gpu ? "GPU" : "CPU");
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +538,8 @@ Java_com_onyxvo_app_NativeBridge_nativeSwitchModel(
 
     try {
         g_extractor->switchModel(mgr, model_type);
+        // Invalidate previous frame since model changed
+        g_match.has_prev_frame = false;
         LOGI("Switched to model: %s", g_extractor->modelName());
         return JNI_TRUE;
     } catch (const std::exception& e) {
@@ -444,13 +550,6 @@ Java_com_onyxvo_app_NativeBridge_nativeSwitchModel(
 
 // ---------------------------------------------------------------------------
 // Phase 3: Inference benchmark (FP32 vs INT8)
-//
-// Returns FloatArray:
-//   [0] fp32_avg_us  — average FP32 inference time
-//   [1] int8_avg_us  — average INT8 inference time
-//   [2] speedup      — fp32/int8 ratio
-//   [3] fp32_kp_count — keypoints from FP32
-//   [4] int8_kp_count — keypoints from INT8
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jfloatArray JNICALL
@@ -524,12 +623,6 @@ Java_com_onyxvo_app_NativeBridge_nativeBenchmarkInference(
 
 // ---------------------------------------------------------------------------
 // Phase 3: Inference validation (smoke test)
-//
-// Returns FloatArray:
-//   [0] fp32_kp_count
-//   [1] int8_kp_count
-//   [2] kp_count_diff_pct — percentage difference
-//   [3] passed — 1.0 if both produce keypoints and diff < 20%
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jfloatArray JNICALL
@@ -594,6 +687,162 @@ Java_com_onyxvo_app_NativeBridge_nativeValidateInference(
             static_cast<float>(fp32_kp),
             static_cast<float>(int8_kp),
             diff_pct,
+            passed ? 1.0f : 0.0f
+        };
+        env->SetFloatArrayRegion(result, 0, 4, data);
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: Matching benchmark (GPU vs CPU)
+//
+// Returns FloatArray:
+//   [0] gpu_avg_us
+//   [1] cpu_avg_us
+//   [2] speedup (cpu/gpu)
+//   [3] match_count
+// ---------------------------------------------------------------------------
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeBenchmarkMatching(
+    JNIEnv* env, jobject /* thiz */,
+    jint iterations) {
+
+    using namespace onyx::matching;
+
+    const int N = 500;
+    const int D = 64;
+
+    // Generate synthetic L2-normalized descriptors
+    Eigen::MatrixXf desc1 = Eigen::MatrixXf::Random(N, D);
+    Eigen::MatrixXf desc2 = Eigen::MatrixXf::Random(N, D);
+    // Normalize rows
+    for (int i = 0; i < N; ++i) {
+        desc1.row(i).normalize();
+        desc2.row(i).normalize();
+    }
+    // Make some descriptors similar to ensure matches exist
+    for (int i = 0; i < N / 5; ++i) {
+        desc2.row(i) = desc1.row(i) + Eigen::RowVectorXf::Random(D) * 0.05f;
+        desc2.row(i).normalize();
+    }
+
+    float gpu_avg = 0.0f;
+    float cpu_avg = 0.0f;
+    int match_count = 0;
+
+    // Benchmark GPU
+    if (g_match.gpu_matcher && g_match.gpu_matcher->isAvailable()) {
+        double total = 0.0;
+        for (int i = 0; i < iterations; ++i) {
+            double t = 0.0;
+            auto m = g_match.gpu_matcher->match(desc1, N, desc2, N, 0.8f, &t);
+            total += t;
+            if (i == 0) match_count = static_cast<int>(m.size());
+        }
+        gpu_avg = static_cast<float>(total / iterations);
+    }
+
+    // Benchmark CPU
+    {
+        CpuMatcher cpu;
+        double total = 0.0;
+        for (int i = 0; i < iterations; ++i) {
+            double t = 0.0;
+            auto m = cpu.match(desc1, N, desc2, N, 0.8f, &t);
+            total += t;
+            if (match_count == 0 && i == 0) match_count = static_cast<int>(m.size());
+        }
+        cpu_avg = static_cast<float>(total / iterations);
+    }
+
+    float speedup = (gpu_avg > 0.0f) ? cpu_avg / gpu_avg : 0.0f;
+
+    LOGI("Matching benchmark (%d iters, %d descs): GPU=%.0f us, CPU=%.0f us, "
+         "Speedup=%.2fx, matches=%d",
+         iterations, N, gpu_avg, cpu_avg, speedup, match_count);
+
+    jfloatArray result = env->NewFloatArray(4);
+    if (result) {
+        float data[4] = { gpu_avg, cpu_avg, speedup, static_cast<float>(match_count) };
+        env->SetFloatArrayRegion(result, 0, 4, data);
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: Matching validation (GPU vs CPU correctness)
+//
+// Returns FloatArray:
+//   [0] gpu_matches
+//   [1] cpu_matches
+//   [2] mismatches (GPU matches not in CPU matches)
+//   [3] passed (1.0 if mismatches == 0)
+// ---------------------------------------------------------------------------
+
+JNIEXPORT jfloatArray JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeValidateMatching(
+    JNIEnv* env, jobject /* thiz */) {
+
+    using namespace onyx::matching;
+
+    const int N = 200;
+    const int D = 64;
+
+    // Generate synthetic descriptors with known matches
+    Eigen::MatrixXf desc1 = Eigen::MatrixXf::Random(N, D);
+    Eigen::MatrixXf desc2 = Eigen::MatrixXf::Random(N, D);
+    for (int i = 0; i < N; ++i) {
+        desc1.row(i).normalize();
+        desc2.row(i).normalize();
+    }
+    // Plant known matches: first 50 descriptors in desc2 are close copies of desc1
+    for (int i = 0; i < 50; ++i) {
+        desc2.row(i) = desc1.row(i) + Eigen::RowVectorXf::Random(D) * 0.02f;
+        desc2.row(i).normalize();
+    }
+
+    // Run CPU matcher
+    CpuMatcher cpu;
+    auto cpu_matches = cpu.match(desc1, N, desc2, N, 0.8f);
+
+    // Run GPU matcher (if available)
+    std::vector<Match> gpu_matches;
+    bool gpu_available = g_match.gpu_matcher && g_match.gpu_matcher->isAvailable();
+    if (gpu_available) {
+        gpu_matches = g_match.gpu_matcher->match(desc1, N, desc2, N, 0.8f);
+    }
+
+    // Compare: count mismatches
+    int mismatches = 0;
+    if (gpu_available) {
+        // Build set of CPU match pairs
+        std::set<std::pair<int, int>> cpu_set;
+        for (const auto& m : cpu_matches) {
+            cpu_set.insert({m.idx1, m.idx2});
+        }
+        for (const auto& m : gpu_matches) {
+            if (cpu_set.find({m.idx1, m.idx2}) == cpu_set.end()) {
+                mismatches++;
+            }
+        }
+    }
+
+    bool passed = gpu_available
+        ? (mismatches == 0 && gpu_matches.size() == cpu_matches.size())
+        : (cpu_matches.size() > 0);  // CPU-only: just verify it produces matches
+
+    LOGI("Validate matching: GPU=%zu matches, CPU=%zu matches, mismatches=%d -> %s",
+         gpu_matches.size(), cpu_matches.size(), mismatches,
+         passed ? "PASS" : "FAIL");
+
+    jfloatArray result = env->NewFloatArray(4);
+    if (result) {
+        float data[4] = {
+            static_cast<float>(gpu_matches.size()),
+            static_cast<float>(cpu_matches.size()),
+            static_cast<float>(mismatches),
             passed ? 1.0f : 0.0f
         };
         env->SetFloatArrayRegion(result, 0, 4, data);

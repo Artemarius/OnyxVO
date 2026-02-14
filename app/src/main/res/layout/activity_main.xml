@@ -15,7 +15,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Keypoint visualization overlay (stacked on top of camera preview) -->
+    <!-- Keypoint + match visualization overlay (stacked on top of camera preview) -->
     <com.onyxvo.app.KeypointOverlayView
         android:id="@+id/keypointOverlay"
         android:layout_width="0dp"
@@ -69,6 +69,22 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toBottomOf="@id/toggleNeonButton" />
 
+    <!-- GPU / CPU matcher toggle -->
+    <Button
+        android:id="@+id/toggleMatcherButton"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="16dp"
+        android:backgroundTint="#CC009688"
+        android:minWidth="80dp"
+        android:text="GPU"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        android:visibility="gone"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/toggleModelButton" />
+
     <!-- Benchmark button -->
     <Button
         android:id="@+id/benchmarkButton"
@@ -82,7 +98,7 @@
         android:textColor="@android:color/white"
         android:textSize="12sp"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/toggleModelButton" />
+        app:layout_constraintTop_toBottomOf="@id/toggleMatcherButton" />
 
     <!-- Benchmark result display -->
     <TextView

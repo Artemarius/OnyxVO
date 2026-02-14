@@ -1,0 +1,52 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 9747694..88e7cb1 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -27,12 +27,17 @@ file(GLOB kompute_CPP
+ )
+ 
+ if(KOMPUTE_OPT_ANDROID_BUILD)
+-    set(VK_ANDROID_COMMON_DIR ${ANDROID_NDK}/sources/third_party/vulkan/src/common)
+     set(VK_ANDROID_PATCH_DIR ${PROJECT_SOURCE_DIR}/vk_ndk_wrapper_include/)
+-    set(VK_ANDROID_INCLUDE_DIR ${ANDROID_NDK}/sources/third_party/vulkan/src/include)
++
++    # Use submodule Vulkan-Headers when available (NDK 25+ headers are
++    # incompatible with the legacy NDK wrapper due to removed NVX extensions).
++    if(KOMPUTE_OPT_REPO_SUBMODULE_BUILD AND EXISTS "${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include/vulkan/vulkan.h")
++        set(VK_ANDROID_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include)
++    else()
++        set(VK_ANDROID_INCLUDE_DIR ${ANDROID_NDK}/sources/third_party/vulkan/src/include)
++    endif()
+ 
+     include_directories(
+-        ${VK_ANDROID_COMMON_DIR}
+         ${VK_ANDROID_PATCH_DIR}
+         ${VK_ANDROID_INCLUDE_DIR})
+ 
+diff --git a/vk_ndk_wrapper_include/kompute_vk_ndk_wrapper.cpp b/vk_ndk_wrapper_include/kompute_vk_ndk_wrapper.cpp
+index e5a71e5..1453611 100755
+--- a/vk_ndk_wrapper_include/kompute_vk_ndk_wrapper.cpp
++++ b/vk_ndk_wrapper_include/kompute_vk_ndk_wrapper.cpp
+@@ -654,6 +654,9 @@ PFN_vkBindImageMemory2KHR vkBindImageMemory2KHR;
+ PFN_vkGetDescriptorSetLayoutSupportKHR vkGetDescriptorSetLayoutSupportKHR;
+ PFN_vkCmdDrawIndirectCountKHR vkCmdDrawIndirectCountKHR;
+ PFN_vkCmdDrawIndexedIndirectCountKHR vkCmdDrawIndexedIndirectCountKHR;
++PFN_vkGetSemaphoreCounterValueKHR vkGetSemaphoreCounterValueKHR;
++PFN_vkSignalSemaphoreKHR vkSignalSemaphoreKHR;
++PFN_vkWaitSemaphoresKHR vkWaitSemaphoresKHR;
+ PFN_vkCreateDebugReportCallbackEXT vkCreateDebugReportCallbackEXT;
+ PFN_vkDestroyDebugReportCallbackEXT vkDestroyDebugReportCallbackEXT;
+ PFN_vkDebugReportMessageEXT vkDebugReportMessageEXT;
+diff --git a/vk_ndk_wrapper_include/kompute_vk_ndk_wrapper_patch.hpp b/vk_ndk_wrapper_include/kompute_vk_ndk_wrapper_patch.hpp
+index f25f44c..f32be74 100644
+--- a/vk_ndk_wrapper_include/kompute_vk_ndk_wrapper_patch.hpp
++++ b/vk_ndk_wrapper_include/kompute_vk_ndk_wrapper_patch.hpp
+@@ -183,3 +183,8 @@ extern PFN_vkSubmitDebugUtilsMessageEXT vkSubmitDebugUtilsMessageEXT;
+ extern PFN_vkUnregisterObjectsNVX vkUnregisterObjectsNVX;
+ extern PFN_vkCreateAccelerationStructureNV vkCreateAccelerationStructureNV;
+ 
++// VK_KHR_timeline_semaphore (added for Vulkan SDK 1.1.126 compat)
++extern PFN_vkGetSemaphoreCounterValueKHR vkGetSemaphoreCounterValueKHR;
++extern PFN_vkSignalSemaphoreKHR vkSignalSemaphoreKHR;
++extern PFN_vkWaitSemaphoresKHR vkWaitSemaphoresKHR;
++

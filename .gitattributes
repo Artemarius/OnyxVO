@@ -1,2 +1,4 @@
 # Git LFS tracking for large binary files
 *.onnx filter=lfs diff=lfs merge=lfs -text
+# Patch files must keep LF endings for git apply
+*.patch text eol=lf

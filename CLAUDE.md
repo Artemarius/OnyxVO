@@ -35,9 +35,13 @@ cpp/
 │   ├── xfeat_extractor.h       # ONNX Runtime session wrapper
 │   └── xfeat_extractor.cpp     # Load model, run inference, extract keypoints + descriptors
 ├── matching/
+│   ├── cpu_matcher.h           # CPU brute-force fallback
+│   ├── cpu_matcher.cpp         # L2 matching with ratio test (scalar)
 │   ├── gpu_matcher.h           # Kompute-based matching
 │   ├── gpu_matcher.cpp         # Setup Kompute manager, dispatch compute, read results
-│   └── shaders/                # Pre-compiled SPIR-V or raw GLSL
+│   └── shaders/                # GLSL compute shaders (compiled to SPIR-V at build time)
+├── cmake/
+│   └── spv_to_header.cmake     # SPIR-V binary → C++ uint32_t array header
 ├── vo/
 │   ├── pose_estimator.h        # RANSAC + essential matrix
 │   ├── pose_estimator.cpp      # 5-point algorithm, cheirality check
@@ -65,10 +69,12 @@ cpp/
 
 ### Kompute / Vulkan Compute Configuration
 - **Android Vulkan:** Dynamic loading via Kompute's NDK wrapper (`VK_USE_PLATFORM_ANDROID_KHR`)
-- **Compute shader:** GLSL → SPIR-V (pre-compiled, stored as raw asset or embedded header)
-- **Matching algorithm:** Brute-force L2 with ratio test, workgroup size tuned per device (start with 256)
-- **Buffer layout:** Descriptors as `float[N][64]`, output as `int[N]` match indices + `float[N]` distances
-- **Fallback:** If Vulkan unavailable, CPU brute-force matching (scalar with optional NEON dot product)
+- **Kompute version:** v0.8.1 with Vulkan-Headers v1.1.126 (patched NDK wrapper for NDK 25+ compat)
+- **Compute shader:** GLSL → SPIR-V via NDK `glslc` at build time → embedded as C++ `uint32_t[]` header
+- **Matching algorithm:** Brute-force L2 with ratio test, workgroup size 256, inner loop unrolled 4-wide
+- **Buffer layout:** Descriptors as `float[N][64]`, output as `int[N]` match indices + `float[N]` distances + `float[N]` second distances
+- **Ratio test:** Applied CPU-side after GPU readback: `best_sq < threshold^2 * second_sq`
+- **Fallback:** If Vulkan unavailable, CPU brute-force matching (scalar Eigen row operations)
 
 ### Pose Estimation
 - **Algorithm:** 5-point algorithm (Nister) with RANSAC
@@ -171,4 +177,5 @@ Claude Code should implement ONE phase at a time. Do not pull in components from
 - C: drive has limited space — all SDK/build artifacts go on D:
 - No standalone JDK installed; using Android Studio's bundled JBR 21
 - Test device: Samsung Galaxy S21 via USB debugging
-- Project status: Phase 3 complete (XFeat ONNX integration: backbone-only export, FP32+INT8, keypoint overlay, inference benchmark)
+- NDK 25.1.8937393 required for Kompute build (NDK wrapper needs `sources/third_party/vulkan/` path)
+- Project status: Phase 4 complete (Kompute descriptor matching with GPU/CPU, match visualization, benchmarks)

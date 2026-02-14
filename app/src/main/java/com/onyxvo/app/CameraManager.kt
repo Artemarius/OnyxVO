@@ -33,7 +33,11 @@ class CameraManager(
         // Phase 3 additions
         val inferenceTimeUs: Float = 0f,
         val keypointCount: Int = 0,
-        val keypointCoords: FloatArray = FloatArray(0)
+        val keypointCoords: FloatArray = FloatArray(0),
+        // Phase 4 additions
+        val matchingTimeUs: Float = 0f,
+        val matchCount: Int = 0,
+        val matchLines: FloatArray = FloatArray(0)
     )
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -113,19 +117,32 @@ class CameraManager(
             }
 
             if (modelReady) {
-                // Phase 3: Full pipeline (preprocess + feature extraction)
+                // Phase 3+4: Full pipeline (preprocess + feature extraction + matching)
                 val result = nativeBridge.nativeProcessFrame(
                     yBuffer, width, height, rowStride, useNeon
                 )
 
-                if (result != null && result.size >= 3) {
+                if (result != null && result.size >= 5) {
                     val preprocessUs = result[0]
                     val inferenceUs = result[1]
-                    val kpCount = result[2].toInt()
+                    val matchingUs = result[2]
+                    val kpCount = result[3].toInt()
+                    val matchCount = result[4].toInt()
 
                     // Extract keypoint coordinates (packed as x0,y0,x1,y1,...)
-                    val kpCoords = if (kpCount > 0 && result.size >= 3 + kpCount * 2) {
-                        result.copyOfRange(3, 3 + kpCount * 2)
+                    val kpStart = 5
+                    val kpEnd = kpStart + kpCount * 2
+                    val kpCoords = if (kpCount > 0 && result.size >= kpEnd) {
+                        result.copyOfRange(kpStart, kpEnd)
+                    } else {
+                        FloatArray(0)
+                    }
+
+                    // Extract match lines (packed as prev_x,prev_y,curr_x,curr_y,...)
+                    val matchStart = kpEnd
+                    val matchEnd = matchStart + matchCount * 4
+                    val matchLines = if (matchCount > 0 && result.size >= matchEnd) {
+                        result.copyOfRange(matchStart, matchEnd)
                     } else {
                         FloatArray(0)
                     }
@@ -137,11 +154,14 @@ class CameraManager(
                             format = imageProxy.format,
                             resizeTimeUs = preprocessUs,  // total preprocess
                             normalizeTimeUs = 0f,
-                            totalTimeUs = preprocessUs + inferenceUs,
+                            totalTimeUs = preprocessUs + inferenceUs + matchingUs,
                             useNeon = useNeon,
                             inferenceTimeUs = inferenceUs,
                             keypointCount = kpCount,
-                            keypointCoords = kpCoords
+                            keypointCoords = kpCoords,
+                            matchingTimeUs = matchingUs,
+                            matchCount = matchCount,
+                            matchLines = matchLines
                         )
                     )
                 }

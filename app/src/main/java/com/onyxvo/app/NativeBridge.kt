@@ -42,8 +42,9 @@ class NativeBridge {
     // Returns true on success
     external fun nativeInitModel(assetManager: AssetManager, useInt8: Boolean): Boolean
 
-    // Phase 3: Process frame (preprocess + feature extraction)
-    // Returns FloatArray [preprocess_us, inference_us, kp_count, x0, y0, x1, y1, ...] or null
+    // Phase 3+4: Process frame (preprocess + feature extraction + matching)
+    // Returns FloatArray [preprocess_us, inference_us, matching_us, kp_count, match_count,
+    //                     kp_coords..., match_lines...] or null
     external fun nativeProcessFrame(
         yPlaneBuffer: ByteBuffer,
         width: Int,
@@ -62,4 +63,19 @@ class NativeBridge {
     // Phase 3: Inference validation smoke test
     // Returns FloatArray [fp32_kp_count, int8_kp_count, diff_pct, passed]
     external fun nativeValidateInference(assetManager: AssetManager): FloatArray?
+
+    // Phase 4: Initialize matcher (GPU + CPU fallback)
+    // Returns true if GPU matcher is available, false if CPU-only
+    external fun nativeInitMatcher(): Boolean
+
+    // Phase 4: Toggle GPU/CPU matching
+    external fun nativeSetMatcherUseGpu(useGpu: Boolean)
+
+    // Phase 4: Matching benchmark (GPU vs CPU)
+    // Returns FloatArray [gpu_avg_us, cpu_avg_us, speedup, match_count]
+    external fun nativeBenchmarkMatching(iterations: Int): FloatArray?
+
+    // Phase 4: Matching validation (GPU vs CPU correctness)
+    // Returns FloatArray [gpu_matches, cpu_matches, mismatches, passed]
+    external fun nativeValidateMatching(): FloatArray?
 }
