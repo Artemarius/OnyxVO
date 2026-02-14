@@ -32,4 +32,8 @@ class NativeBridge {
         rowStride: Int,
         iterations: Int
     ): FloatArray?
+
+    // Phase 2: NEON vs scalar validation (no camera needed — uses synthetic data)
+    // Returns FloatArray [resize_max_err, normalize_max_err, pipeline_max_err, all_passed]
+    external fun nativeValidatePreprocessing(): FloatArray?
 }
