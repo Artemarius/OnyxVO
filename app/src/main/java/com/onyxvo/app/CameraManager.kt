@@ -15,13 +15,32 @@ import java.util.concurrent.Executors
 class CameraManager(
     private val lifecycleOwner: LifecycleOwner,
     private val previewView: PreviewView,
-    private val onFrameInfo: (width: Int, height: Int, format: Int) -> Unit
+    private val nativeBridge: NativeBridge,
+    private val onFrameProcessed: (FrameResult) -> Unit
 ) {
     companion object {
         private const val TAG = "OnyxVO.Camera"
     }
 
+    data class FrameResult(
+        val width: Int,
+        val height: Int,
+        val format: Int,
+        val resizeTimeUs: Float,
+        val normalizeTimeUs: Float,
+        val totalTimeUs: Float,
+        val useNeon: Boolean
+    )
+
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
+    @Volatile
+    var useNeon: Boolean = true
+
+    @Volatile
+    var benchmarkRequested: Boolean = false
+
+    var onBenchmarkResult: ((FloatArray) -> Unit)? = null
 
     fun start() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(previewView.context)
@@ -41,6 +60,7 @@ class CameraManager(
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
         val imageAnalysis = ImageAnalysis.Builder()
+            .setTargetResolution(android.util.Size(1920, 1080))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also { analysis ->
@@ -63,7 +83,50 @@ class CameraManager(
     }
 
     private fun processFrame(imageProxy: ImageProxy) {
-        onFrameInfo(imageProxy.width, imageProxy.height, imageProxy.format)
-        imageProxy.close()
+        try {
+            val yPlane = imageProxy.planes[0]
+            val yBuffer = yPlane.buffer
+            val rowStride = yPlane.rowStride
+
+            // Rewind to ensure native reads from position 0
+            yBuffer.rewind()
+
+            val width = imageProxy.width
+            val height = imageProxy.height
+
+            // Run benchmark if requested (one-shot, blocks the analysis thread)
+            if (benchmarkRequested) {
+                benchmarkRequested = false
+                val result = nativeBridge.nativeBenchmarkPreprocessing(
+                    yBuffer, width, height, rowStride, 100
+                )
+                if (result != null) {
+                    onBenchmarkResult?.invoke(result)
+                }
+                // Re-rewind after benchmark consumed the buffer
+                yBuffer.rewind()
+            }
+
+            // Normal per-frame preprocessing
+            val timing = nativeBridge.nativePreprocessFrame(
+                yBuffer, width, height, rowStride, useNeon
+            )
+
+            if (timing != null) {
+                onFrameProcessed(
+                    FrameResult(
+                        width = width,
+                        height = height,
+                        format = imageProxy.format,
+                        resizeTimeUs = timing[0],
+                        normalizeTimeUs = timing[1],
+                        totalTimeUs = timing[2],
+                        useNeon = useNeon
+                    )
+                )
+            }
+        } finally {
+            imageProxy.close()
+        }
     }
 }

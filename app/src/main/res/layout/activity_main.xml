@@ -15,6 +15,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
+    <!-- Debug overlay: preprocessing timing stats -->
     <TextView
         android:id="@+id/debugOverlay"
         android:layout_width="wrap_content"
@@ -25,8 +26,52 @@
         android:padding="8dp"
         android:text="OnyxVO"
         android:textColor="@android:color/white"
-        android:textSize="14sp"
+        android:textSize="12sp"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- NEON / Scalar toggle -->
+    <Button
+        android:id="@+id/toggleNeonButton"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_margin="16dp"
+        android:backgroundTint="#CC2196F3"
+        android:minWidth="80dp"
+        android:text="NEON"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Benchmark button -->
+    <Button
+        android:id="@+id/benchmarkButton"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="16dp"
+        android:backgroundTint="#CCFF9800"
+        android:minWidth="80dp"
+        android:text="Bench"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/toggleNeonButton" />
+
+    <!-- Benchmark result display -->
+    <TextView
+        android:id="@+id/benchmarkResult"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:background="#CC000000"
+        android:fontFamily="monospace"
+        android:padding="8dp"
+        android:textColor="#FFFFEB3B"
+        android:textSize="12sp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

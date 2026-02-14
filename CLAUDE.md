@@ -30,7 +30,7 @@ cpp/
 ├── pipeline.h / pipeline.cpp   # Orchestrates full frame pipeline
 ├── preprocessing/
 │   ├── neon_ops.h              # NEON intrinsic declarations
-│   └── neon_ops.cpp            # RGB→gray, resize, normalize (ARM NEON)
+│   └── neon_ops.cpp            # Y-plane resize, normalize (ARM NEON + scalar)
 ├── feature/
 │   ├── xfeat_extractor.h       # ONNX Runtime session wrapper
 │   └── xfeat_extractor.cpp     # Load model, run inference, extract keypoints + descriptors
@@ -171,4 +171,4 @@ Claude Code should implement ONE phase at a time. Do not pull in components from
 - C: drive has limited space — all SDK/build artifacts go on D:
 - No standalone JDK installed; using Android Studio's bundled JBR 21
 - Test device: Samsung Galaxy S21 via USB debugging
-- Project status: Phase 1 complete (project skeleton, CameraX, JNI bridge)
+- Project status: Phase 2 complete (NEON preprocessing: bilinear resize, normalize, benchmark, debug overlay)
