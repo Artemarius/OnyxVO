@@ -255,7 +255,9 @@ class MainActivity : AppCompatActivity() {
 
         // Update keypoint overlay
         if (result.keypointCoords.isNotEmpty()) {
-            binding.keypointOverlay.updateKeypoints(result.keypointCoords, 640, 480)
+            binding.keypointOverlay.updateKeypoints(
+                result.keypointCoords, 640, 480, result.rotationDegrees
+            )
         }
 
         // Update match lines overlay

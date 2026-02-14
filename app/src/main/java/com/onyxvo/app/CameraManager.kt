@@ -42,7 +42,9 @@ class CameraManager(
         val poseTimeUs: Float = 0f,
         val inlierCount: Int = 0,
         val keyframeCount: Int = 0,
-        val trajectoryXZ: FloatArray = FloatArray(0)
+        val trajectoryXZ: FloatArray = FloatArray(0),
+        // Sensor rotation (degrees CW to match display)
+        val rotationDegrees: Int = 0
     )
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -183,7 +185,8 @@ class CameraManager(
                             poseTimeUs = poseUs,
                             inlierCount = inlierCount,
                             keyframeCount = keyframeCount,
-                            trajectoryXZ = trajectoryXZ
+                            trajectoryXZ = trajectoryXZ,
+                            rotationDegrees = imageProxy.imageInfo.rotationDegrees
                         )
                     )
                 }
@@ -202,7 +205,8 @@ class CameraManager(
                             resizeTimeUs = timing[0],
                             normalizeTimeUs = timing[1],
                             totalTimeUs = timing[2],
-                            useNeon = useNeon
+                            useNeon = useNeon,
+                            rotationDegrees = imageProxy.imageInfo.rotationDegrees
                         )
                     )
                 }
