@@ -13,7 +13,7 @@ Camera Frame (CameraX)
     │
     ▼
 ┌─────────────────────────┐
-│  NEON Preprocessing     │  ARM SIMD: RGB→Gray, resize, normalize
+│  NEON Preprocessing     │  ARM SIMD: Y-plane extract, resize, normalize
 └─────────┬───────────────┘
           │
           ▼
@@ -37,28 +37,26 @@ Camera Frame (CameraX)
 └─────────────────────────┘
 ```
 
-## What's Implemented
+## Development Status
 
-**Feature Extraction**
-- XFeat (CVPR 2024) exported to ONNX, quantized to INT8 for mobile deployment
-- FP32 and INT8 models included with runtime comparison benchmarks
-- ONNX Runtime C++ API with CPU execution provider (NNAPI optional)
+| Phase | Description | Status |
+|---|---|---|
+| 1 | Project skeleton, CameraX preview, JNI bridge | Done |
+| 2 | NEON image preprocessing with benchmarks | Planned |
+| 3 | XFeat ONNX integration (FP32 + INT8) | Planned |
+| 4 | Kompute descriptor matching (Vulkan compute) | Planned |
+| 5 | Pose estimation (RANSAC + essential matrix) | Planned |
+| 6 | Full pipeline integration + performance dashboard | Planned |
+| 7 | Optimization + multi-device benchmarks | Planned |
+| 8 | Polish, demo recording, documentation | Planned |
 
-**GPU-Accelerated Matching**
-- Kompute (Vulkan compute framework) for descriptor matching on mobile GPU
-- Custom GLSL compute shaders for brute-force L2 nearest neighbor search
-- Lowe's ratio test filtering implemented in shader
+### What's Working Now
 
-**Image Preprocessing (NEON)**
-- ARM NEON SIMD intrinsics for RGB-to-grayscale conversion
-- Vectorized image resize and float normalization
-- Benchmarked against scalar baseline
-
-**Visual Odometry Pipeline**
-- 5-point algorithm with RANSAC for essential matrix estimation
-- Cheirality check for correct pose recovery
-- Cumulative pose tracking with scale estimation
-- Real-time trajectory visualization overlaid on camera preview
+- Android project with Gradle + CMake NDK build pipeline
+- CameraX live preview with `ImageAnalysis` frame callback
+- JNI bridge: native C++ library loaded, `nativeInit()` / `nativeGetVersion()` round-trip
+- Frame metadata (resolution, YUV format) logged from analyzer callback
+- Debug overlay displaying native version string and frame info
 
 ## Performance Targets
 
@@ -74,67 +72,50 @@ Camera Frame (CameraX)
 
 ### Prerequisites
 - Android Studio Hedgehog+
-- Android NDK r26+
-- CMake 3.22+
-- Android device with Vulkan 1.1+ support
+- Android NDK (installed via SDK Manager)
+- CMake 3.22+ (installed via SDK Manager)
+- Android device with `arm64-v8a` (Vulkan 1.1+ recommended)
 
 ### Build Steps
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/artem-shamsuarov/onyx-vo.git
-
-# Open in Android Studio → Build → Run
-# Or from command line:
+git clone https://github.com/artem-shamsuarov/onyx-vo.git
 cd onyx-vo
 ./gradlew assembleDebug
 ```
 
-### Model Preparation (one-time)
-```bash
-# Export and quantize XFeat model
-cd scripts/
-python export_xfeat_onnx.py --output ../app/src/main/assets/xfeat_fp32.onnx
-python quantize_xfeat.py --input ../app/src/main/assets/xfeat_fp32.onnx \
-                         --output ../app/src/main/assets/xfeat_int8.onnx
-```
+Or open in Android Studio and run on a physical device.
 
 ## Project Structure
 
 ```
-onyx-vo/
+OnyxVO/
 ├── app/
-│   ├── src/main/
-│   │   ├── java/com/onyxvo/         # Kotlin UI layer
-│   │   │   ├── MainActivity.kt
-│   │   │   ├── CameraManager.kt
-│   │   │   └── TrajectoryView.kt
-│   │   ├── cpp/                      # Native C++ core
-│   │   │   ├── CMakeLists.txt
-│   │   │   ├── jni_bridge.cpp
-│   │   │   ├── preprocessing/        # NEON image ops
-│   │   │   ├── feature/              # ONNX Runtime XFeat wrapper
-│   │   │   ├── matching/             # Kompute GPU matching
-│   │   │   ├── vo/                   # Pose estimation & tracking
-│   │   │   └── utils/                # Timing, logging
-│   │   ├── assets/                   # ONNX models
-│   │   └── res/
-│   └── build.gradle.kts
-├── shaders/                          # GLSL compute shaders
-│   └── match_descriptors.comp
-├── scripts/                          # Model export & quantization
-├── third_party/                      # Kompute, Eigen
-└── build.gradle.kts
+│   ├── build.gradle.kts          # minSdk 28, targetSdk 34, arm64-v8a, CameraX
+│   └── src/main/
+│       ├── AndroidManifest.xml
+│       ├── java/com/onyxvo/app/
+│       │   ├── MainActivity.kt   # Permission handling, debug overlay
+│       │   ├── CameraManager.kt  # CameraX Preview + ImageAnalysis
+│       │   └── NativeBridge.kt   # JNI wrapper
+│       ├── cpp/
+│       │   ├── CMakeLists.txt    # C++17 native build
+│       │   ├── jni_bridge.cpp    # Native entry point
+│       │   └── utils/
+│       │       └── android_log.h # Logging macros
+│       └── res/
+├── build.gradle.kts              # AGP 8.2.2, Kotlin 1.9.22
+└── settings.gradle.kts
 ```
 
 ## Dependencies
 
 | Library | Version | Role |
 |---|---|---|
-| [Kompute](https://github.com/KomputeProject/kompute) | latest | Vulkan compute abstraction |
-| [ONNX Runtime](https://onnxruntime.ai/) | 1.17+ | Neural network inference |
-| [XFeat](https://github.com/verlab/accelerated_features) | CVPR 2024 | Learned feature extraction |
-| [Eigen](https://eigen.tuxfamily.org/) | 3.4+ | Linear algebra (pose estimation) |
-| CameraX | latest | Android camera API |
+| CameraX | 1.3.1 | Android camera API |
+| [Kompute](https://github.com/KomputeProject/kompute) | TBD | Vulkan compute abstraction (Phase 4) |
+| [ONNX Runtime](https://onnxruntime.ai/) | TBD | Neural network inference (Phase 3) |
+| [XFeat](https://github.com/verlab/accelerated_features) | CVPR 2024 | Learned feature extraction (Phase 3) |
+| [Eigen](https://eigen.tuxfamily.org/) | 3.4+ | Linear algebra (Phase 5) |
 
 ## References
 

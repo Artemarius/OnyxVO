@@ -148,3 +148,27 @@ Claude Code should implement ONE phase at a time. Do not pull in components from
 - **Instrumented tests (Android):** Keypoint count sanity, pipeline latency assertions
 - **Visual validation:** Record known trajectory (e.g., phone on desk, rotate 360°), verify closed loop
 - **A/B comparison:** FP32 vs INT8 keypoint quality (reprojection error on calibration images)
+
+## Local Development Environment (Windows)
+- **OS:** Windows 10 Pro (10.0.19045)
+- **IDE:** Android Studio (installed at `D:\Program Files\Android\Android Studio`)
+- **JDK:** JetBrains Runtime 21 (bundled with Android Studio at `D:\Program Files\Android\Android Studio\jbr`)
+- **Android SDK:** `D:\Android\Sdk` (SDK 34, NDK, CMake installed)
+- **OpenCV Android SDK:** `D:\OpenCV-android-sdk` (v4.12.0)
+- **Gradle cache:** `D:\Android\.gradle`
+- **Project repo:** `E:\Repos\OnyxVO`
+
+### Environment Variables (user-level)
+| Variable | Value |
+|----------|-------|
+| `ANDROID_HOME` | `D:\Android\Sdk` |
+| `JAVA_HOME` | `D:\Program Files\Android\Android Studio\jbr` |
+| `GRADLE_USER_HOME` | `D:\Android\.gradle` |
+| `OPENCV_ANDROID_SDK` | `D:\OpenCV-android-sdk` |
+| `PATH` (appended) | `D:\Android\Sdk\platform-tools` |
+
+### Notes
+- C: drive has limited space — all SDK/build artifacts go on D:
+- No standalone JDK installed; using Android Studio's bundled JBR 21
+- Test device: Samsung Galaxy S21 via USB debugging
+- Project status: Phase 1 complete (project skeleton, CameraX, JNI bridge)
