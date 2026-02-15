@@ -154,6 +154,7 @@ target_include_directories(onnxruntime INTERFACE
 # ---------------------------------------------------------------------------
 add_library(onyx_vo SHARED
     jni_bridge.cpp
+    pipeline.cpp
     preprocessing/neon_ops.cpp
     feature/xfeat_extractor.cpp
     matching/cpu_matcher.cpp

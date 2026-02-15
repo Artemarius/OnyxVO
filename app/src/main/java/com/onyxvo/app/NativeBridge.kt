@@ -84,4 +84,10 @@ class NativeBridge {
     // Phase 4: Matching validation (GPU vs CPU correctness)
     // Returns FloatArray [gpu_matches, cpu_matches, mismatches, passed]
     external fun nativeValidateMatching(): FloatArray?
+
+    // Phase 6: Destroy pipeline and free all native resources
+    external fun nativeDestroy()
+
+    // Phase 6: Check if pipeline is fully initialized and ready
+    external fun nativeIsReady(): Boolean
 }

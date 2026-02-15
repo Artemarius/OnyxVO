@@ -13,12 +13,17 @@
 #include "matching/cpu_matcher.h"
 #include "vo/pose_estimator.h"
 #include "vo/trajectory.h"
+#include "pipeline.h"
 
-#define ONYX_VO_VERSION "0.5.0-phase5"
+#define ONYX_VO_VERSION "0.6.0-phase6"
 
 namespace {
 
-// Pre-allocated buffers for frame preprocessing — created once, reused every frame.
+// Single Pipeline instance — owns all compute state.
+std::unique_ptr<onyx::Pipeline> g_pipeline;
+onyx::Pipeline::Config g_config;
+
+// Pre-allocated buffers for standalone preprocessing (benchmark/validation only).
 struct PreprocessState {
     std::unique_ptr<uint8_t[]> resized;  // dst_w * dst_h
     std::unique_ptr<float[]>   output;   // dst_w * dst_h
@@ -43,44 +48,34 @@ PreprocessState g_preprocess;
 constexpr float kDefaultMean = 0.0f;
 constexpr float kDefaultStd  = 255.0f;
 
-// Phase 3: XFeat extractor
-std::unique_ptr<onyx::feature::XFeatExtractor> g_extractor;
-
-// Phase 4: Matching state
-struct MatchState {
-    std::unique_ptr<onyx::matching::GpuMatcher> gpu_matcher;
-    onyx::matching::CpuMatcher cpu_matcher;
-    bool use_gpu = true;
-    bool initialized = false;
-
-    // Previous frame features for frame-to-frame matching
-    onyx::feature::FeatureResult prev_features;
-    bool has_prev_frame = false;
-};
-
-MatchState g_match;
-
-// Phase 5: Visual odometry state
-struct VOState {
-    std::unique_ptr<onyx::vo::PoseEstimator> estimator;
-    onyx::vo::Trajectory trajectory;
-    bool initialized = false;
-};
-
-VOState g_vo;
-
 } // anonymous namespace
 
 extern "C" {
 
 JNIEXPORT void JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeInit(JNIEnv* /* env */, jobject /* thiz */) {
+    g_pipeline = std::make_unique<onyx::Pipeline>();
     LOGI("OnyxVO native init — version %s", ONYX_VO_VERSION);
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeGetVersion(JNIEnv* env, jobject /* thiz */) {
     return env->NewStringUTF(ONYX_VO_VERSION);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeDestroy(JNIEnv*, jobject) {
+    g_pipeline.reset();
+    LOGI("Pipeline destroyed");
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeIsReady(JNIEnv*, jobject) {
+    return g_pipeline && g_pipeline->isModelLoaded() && g_pipeline->isMatcherReady();
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +337,7 @@ Java_com_onyxvo_app_NativeBridge_nativeValidatePreprocessing(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: Model initialization
+// Phase 3: Model initialization (delegates to Pipeline)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jboolean JNICALL
@@ -355,49 +350,32 @@ Java_com_onyxvo_app_NativeBridge_nativeInitModel(
         LOGE("nativeInitModel: AAssetManager_fromJava returned null");
         return JNI_FALSE;
     }
-
-    auto model_type = use_int8
-        ? onyx::feature::XFeatExtractor::ModelType::INT8
-        : onyx::feature::XFeatExtractor::ModelType::FP32;
-
-    try {
-        g_extractor = std::make_unique<onyx::feature::XFeatExtractor>(mgr, model_type);
-        LOGI("Model initialized: %s", g_extractor->modelName());
-        return JNI_TRUE;
-    } catch (const std::exception& e) {
-        LOGE("nativeInitModel failed: %s", e.what());
-        g_extractor.reset();
+    if (!g_pipeline) {
+        LOGE("nativeInitModel: pipeline not initialized");
         return JNI_FALSE;
     }
+
+    return g_pipeline->initModel(mgr, use_int8) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4: Matcher initialization
+// Phase 4: Matcher initialization (delegates to Pipeline)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jboolean JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeInitMatcher(
     JNIEnv* /* env */, jobject /* thiz */) {
 
-    try {
-        g_match.gpu_matcher = std::make_unique<onyx::matching::GpuMatcher>(600);
-        g_match.use_gpu = g_match.gpu_matcher->isAvailable();
-        g_match.initialized = true;
-        g_match.has_prev_frame = false;
-
-        LOGI("Matcher init: GPU=%s", g_match.use_gpu ? "yes" : "no (CPU fallback)");
-        return g_match.use_gpu ? JNI_TRUE : JNI_FALSE;
-    } catch (const std::exception& e) {
-        LOGE("nativeInitMatcher failed: %s", e.what());
-        g_match.use_gpu = false;
-        g_match.initialized = true;  // CPU matcher is always available
-        g_match.has_prev_frame = false;
+    if (!g_pipeline) {
+        LOGE("nativeInitMatcher: pipeline not initialized");
         return JNI_FALSE;
     }
+
+    return g_pipeline->initMatcher() ? JNI_TRUE : JNI_FALSE;
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3+4+5: Process frame (preprocess + extract + match + pose estimation)
+// Phase 3+4+5+6: Process frame (delegates to Pipeline)
 //
 // Returns FloatArray:
 //   [0] preprocess_us
@@ -409,9 +387,10 @@ Java_com_onyxvo_app_NativeBridge_nativeInitMatcher(
 //   [6] inlier_count
 //   [7] keyframe_count
 //   [8] trajectory_count (T)
-//   [9..9+2N)              keypoint coordinates (x0, y0, x1, y1, ...)
-//   [9+2N..9+2N+4M)        match lines (prev_x, prev_y, curr_x, curr_y per match)
-//   [9+2N+4M..9+2N+4M+2T)  trajectory XZ positions (x0, z0, x1, z1, ...)
+//   [9] budget_exceeded (1.0 or 0.0)
+//   [10..10+2N)              keypoint coordinates (x0, y0, x1, y1, ...)
+//   [10+2N..10+2N+4M)        match lines (prev_x, prev_y, curr_x, curr_y per match)
+//   [10+2N+4M..10+2N+4M+2T)  trajectory XZ positions (x0, z0, x1, z1, ...)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jfloatArray JNICALL
@@ -421,188 +400,115 @@ Java_com_onyxvo_app_NativeBridge_nativeProcessFrame(
     jint width, jint height, jint row_stride,
     jboolean use_neon) {
 
-    using namespace onyx::preprocessing;
-
     auto* y_plane = static_cast<const uint8_t*>(
         env->GetDirectBufferAddress(y_plane_buffer));
     if (!y_plane) {
         LOGE("nativeProcessFrame: GetDirectBufferAddress returned null");
         return nullptr;
     }
-    if (!g_extractor) {
-        LOGE("nativeProcessFrame: model not initialized");
+    if (!g_pipeline) {
+        LOGE("nativeProcessFrame: pipeline not initialized");
         return nullptr;
     }
 
-    g_preprocess.ensure_init(kTargetWidth, kTargetHeight);
+    // Delegate to Pipeline
+    auto frame = g_pipeline->processFrame(y_plane, width, height, row_stride, use_neon);
 
-    // Step 1: Preprocess (resize + normalize)
-    auto timing = preprocess_frame(
-        y_plane, width, height, row_stride,
-        g_preprocess.resized.get(),
-        g_preprocess.output.get(),
-        kTargetWidth, kTargetHeight,
-        kDefaultMean, kDefaultStd,
-        use_neon);
+    const auto& stats = frame.stats;
+    int n = stats.keypoint_count;
+    int m = stats.match_count;
+    int t_count = stats.trajectory_count;
 
-    // Step 2: Feature extraction
-    auto features = g_extractor->extract(
-        g_preprocess.output.get(), kTargetWidth, kTargetHeight);
-
-    // Step 3: Matching (if we have a previous frame and matcher is initialized)
-    double matching_us = 0.0;
-    std::vector<onyx::matching::Match> matches;
-
-    if (g_match.initialized && g_match.has_prev_frame &&
-        features.count > 0 && g_match.prev_features.count > 0) {
-
-        if (g_match.use_gpu && g_match.gpu_matcher && g_match.gpu_matcher->isAvailable()) {
-            matches = g_match.gpu_matcher->match(
-                g_match.prev_features.descriptors, g_match.prev_features.count,
-                features.descriptors, features.count,
-                0.8f, &matching_us);
-        } else {
-            matches = g_match.cpu_matcher.match(
-                g_match.prev_features.descriptors, g_match.prev_features.count,
-                features.descriptors, features.count,
-                0.8f, &matching_us);
-        }
-    }
-
-    // Step 4: Pose estimation (if VO initialized and we have matches)
-    double pose_us = 0.0;
-    int inlier_count = 0;
-
-    if (g_vo.initialized && g_vo.estimator && !matches.empty()) {
-        // Build matched point vectors
-        std::vector<Eigen::Vector2f> matched_pts1(matches.size());
-        std::vector<Eigen::Vector2f> matched_pts2(matches.size());
-        for (size_t i = 0; i < matches.size(); ++i) {
-            matched_pts1[i] = g_match.prev_features.keypoints[matches[i].idx1];
-            matched_pts2[i] = features.keypoints[matches[i].idx2];
-        }
-
-        auto pose_result = g_vo.estimator->estimatePose(matched_pts1, matched_pts2);
-        pose_us = pose_result.estimation_us;
-        inlier_count = pose_result.inlier_count;
-
-        if (pose_result.valid) {
-            g_vo.trajectory.update(pose_result.R, pose_result.t);
-            g_vo.trajectory.incrementKeyframeCount();
-        }
-    }
-
-    int n = features.count;
-    int m = static_cast<int>(matches.size());
-    const auto& positions = g_vo.trajectory.positions();
-    int t_count = static_cast<int>(positions.size());
-
-    // Pack result: 9-field header + keypoints + match lines + trajectory XZ
-    int result_size = 9 + n * 2 + m * 4 + t_count * 2;
+    // Pack result: 10-field header + keypoints + match lines + trajectory XZ
+    int result_size = 10 + n * 2 + m * 4 + t_count * 2;
     jfloatArray result = env->NewFloatArray(result_size);
     if (!result) return nullptr;
 
     auto data = std::make_unique<float[]>(result_size);
-    data[0] = static_cast<float>(timing.total_us);
-    data[1] = static_cast<float>(features.inference_us);
-    data[2] = static_cast<float>(matching_us);
-    data[3] = static_cast<float>(pose_us);
+    data[0] = static_cast<float>(stats.preprocess_us);
+    data[1] = static_cast<float>(stats.inference_us);
+    data[2] = static_cast<float>(stats.matching_us);
+    data[3] = static_cast<float>(stats.pose_us);
     data[4] = static_cast<float>(n);
     data[5] = static_cast<float>(m);
-    data[6] = static_cast<float>(inlier_count);
-    data[7] = static_cast<float>(g_vo.trajectory.keyframeCount());
+    data[6] = static_cast<float>(stats.inlier_count);
+    data[7] = static_cast<float>(stats.keyframe_count);
     data[8] = static_cast<float>(t_count);
+    data[9] = stats.budget_exceeded ? 1.0f : 0.0f;
 
     // Keypoint coordinates
-    for (int i = 0; i < n; ++i) {
-        data[9 + i * 2]     = features.keypoints[i].x();
-        data[9 + i * 2 + 1] = features.keypoints[i].y();
+    for (int i = 0; i < n && i < static_cast<int>(frame.keypoints.size()); ++i) {
+        data[10 + i * 2]     = frame.keypoints[i].x();
+        data[10 + i * 2 + 1] = frame.keypoints[i].y();
     }
 
     // Match lines: (prev_x, prev_y, curr_x, curr_y) per match
-    int match_offset = 9 + n * 2;
-    for (int i = 0; i < m; ++i) {
-        const auto& match = matches[i];
-        data[match_offset + i * 4]     = g_match.prev_features.keypoints[match.idx1].x();
-        data[match_offset + i * 4 + 1] = g_match.prev_features.keypoints[match.idx1].y();
-        data[match_offset + i * 4 + 2] = features.keypoints[match.idx2].x();
-        data[match_offset + i * 4 + 3] = features.keypoints[match.idx2].y();
+    int match_offset = 10 + n * 2;
+    for (int i = 0; i < m && i < static_cast<int>(frame.match_lines.size()); ++i) {
+        data[match_offset + i * 4]     = frame.match_lines[i][0];
+        data[match_offset + i * 4 + 1] = frame.match_lines[i][1];
+        data[match_offset + i * 4 + 2] = frame.match_lines[i][2];
+        data[match_offset + i * 4 + 3] = frame.match_lines[i][3];
     }
 
     // Trajectory XZ positions (top-down view: X = right, Z = forward)
     int traj_offset = match_offset + m * 4;
-    for (int i = 0; i < t_count; ++i) {
-        data[traj_offset + i * 2]     = static_cast<float>(positions[i].x());
-        data[traj_offset + i * 2 + 1] = static_cast<float>(positions[i].z());
+    for (int i = 0; i < t_count && i < static_cast<int>(frame.trajectory_positions.size()); ++i) {
+        data[traj_offset + i * 2]     = static_cast<float>(frame.trajectory_positions[i].x());
+        data[traj_offset + i * 2 + 1] = static_cast<float>(frame.trajectory_positions[i].z());
     }
 
     env->SetFloatArrayRegion(result, 0, result_size, data.get());
-
-    // Cache current features for next frame matching
-    g_match.prev_features = std::move(features);
-    g_match.has_prev_frame = true;
 
     return result;
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5: Visual odometry initialization
+// Phase 5: Visual odometry initialization (delegates to Pipeline)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT void JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeInitVO(
     JNIEnv* /* env */, jobject /* thiz */) {
 
-    // Hardcoded intrinsics for 640x480 model resolution.
-    // Approximation suitable for most smartphone cameras.
-    onyx::vo::CameraIntrinsics K;
-    K.fx = 525.0;
-    K.fy = 525.0;
-    K.cx = 320.0;
-    K.cy = 240.0;
+    if (!g_pipeline) {
+        LOGE("nativeInitVO: pipeline not initialized");
+        return;
+    }
 
-    onyx::vo::PoseEstimator::Config config;
-    config.ransac_iterations = 200;
-    config.inlier_threshold_px = 1.5;
-    config.min_inliers = 15;
-
-    g_vo.estimator = std::make_unique<onyx::vo::PoseEstimator>(K, config);
-    g_vo.trajectory.reset();
-    g_vo.initialized = true;
-
-    LOGI("VO initialized: fx=%.0f fy=%.0f cx=%.0f cy=%.0f",
-         K.fx, K.fy, K.cx, K.cy);
+    g_pipeline->initVO(g_config);
 }
 
 JNIEXPORT void JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeResetTrajectory(
     JNIEnv* /* env */, jobject /* thiz */) {
 
-    g_vo.trajectory.reset();
-    g_match.has_prev_frame = false;
-    LOGI("Trajectory reset");
+    if (!g_pipeline) {
+        LOGE("nativeResetTrajectory: pipeline not initialized");
+        return;
+    }
+
+    g_pipeline->resetTrajectory();
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4: Toggle GPU/CPU matching
+// Phase 4: Toggle GPU/CPU matching (delegates to Pipeline)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT void JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeSetMatcherUseGpu(
     JNIEnv* /* env */, jobject /* thiz */, jboolean use_gpu) {
 
-    if (!g_match.initialized) {
-        LOGW("nativeSetMatcherUseGpu: matcher not initialized");
+    if (!g_pipeline) {
+        LOGW("nativeSetMatcherUseGpu: pipeline not initialized");
         return;
     }
 
-    bool can_use_gpu = g_match.gpu_matcher && g_match.gpu_matcher->isAvailable();
-    g_match.use_gpu = use_gpu && can_use_gpu;
-    LOGI("Matcher mode: %s", g_match.use_gpu ? "GPU" : "CPU");
+    g_pipeline->setUseGpu(use_gpu);
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: Switch model (FP32 / INT8)
+// Phase 3: Switch model (FP32 / INT8) (delegates to Pipeline)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jboolean JNICALL
@@ -610,8 +516,8 @@ Java_com_onyxvo_app_NativeBridge_nativeSwitchModel(
     JNIEnv* env, jobject /* thiz */,
     jobject asset_manager, jboolean use_int8) {
 
-    if (!g_extractor) {
-        LOGE("nativeSwitchModel: model not initialized");
+    if (!g_pipeline) {
+        LOGE("nativeSwitchModel: pipeline not initialized");
         return JNI_FALSE;
     }
 
@@ -621,20 +527,7 @@ Java_com_onyxvo_app_NativeBridge_nativeSwitchModel(
         return JNI_FALSE;
     }
 
-    auto model_type = use_int8
-        ? onyx::feature::XFeatExtractor::ModelType::INT8
-        : onyx::feature::XFeatExtractor::ModelType::FP32;
-
-    try {
-        g_extractor->switchModel(mgr, model_type);
-        // Invalidate previous frame since model changed
-        g_match.has_prev_frame = false;
-        LOGI("Switched to model: %s", g_extractor->modelName());
-        return JNI_TRUE;
-    } catch (const std::exception& e) {
-        LOGE("nativeSwitchModel failed: %s", e.what());
-        return JNI_FALSE;
-    }
+    return g_pipeline->switchModel(mgr, use_int8) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ---------------------------------------------------------------------------
@@ -821,16 +714,23 @@ Java_com_onyxvo_app_NativeBridge_nativeBenchmarkMatching(
     float cpu_avg = 0.0f;
     int match_count = 0;
 
-    // Benchmark GPU
-    if (g_match.gpu_matcher && g_match.gpu_matcher->isAvailable()) {
-        double total = 0.0;
-        for (int i = 0; i < iterations; ++i) {
-            double t = 0.0;
-            auto m = g_match.gpu_matcher->match(desc1, N, desc2, N, 0.8f, &t);
-            total += t;
-            if (i == 0) match_count = static_cast<int>(m.size());
+    // Benchmark GPU — create temporary matcher for benchmark isolation
+    {
+        try {
+            GpuMatcher gpu(600);
+            if (gpu.isAvailable()) {
+                double total = 0.0;
+                for (int i = 0; i < iterations; ++i) {
+                    double t = 0.0;
+                    auto m = gpu.match(desc1, N, desc2, N, 0.8f, &t);
+                    total += t;
+                    if (i == 0) match_count = static_cast<int>(m.size());
+                }
+                gpu_avg = static_cast<float>(total / iterations);
+            }
+        } catch (...) {
+            // GPU not available for benchmark
         }
-        gpu_avg = static_cast<float>(total / iterations);
     }
 
     // Benchmark CPU
@@ -898,9 +798,15 @@ Java_com_onyxvo_app_NativeBridge_nativeValidateMatching(
 
     // Run GPU matcher (if available)
     std::vector<Match> gpu_matches;
-    bool gpu_available = g_match.gpu_matcher && g_match.gpu_matcher->isAvailable();
-    if (gpu_available) {
-        gpu_matches = g_match.gpu_matcher->match(desc1, N, desc2, N, 0.8f);
+    bool gpu_available = false;
+    try {
+        GpuMatcher gpu(600);
+        gpu_available = gpu.isAvailable();
+        if (gpu_available) {
+            gpu_matches = gpu.match(desc1, N, desc2, N, 0.8f);
+        }
+    } catch (...) {
+        // GPU not available
     }
 
     // Compare: count mismatches

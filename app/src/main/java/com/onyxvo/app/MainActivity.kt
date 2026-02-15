@@ -20,6 +20,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var nativeBridge: NativeBridge
+    private lateinit var performanceDashboard: PerformanceDashboardView
     private var cameraManager: CameraManager? = null
 
     private var frameCount = 0L
@@ -33,13 +34,19 @@ class MainActivity : AppCompatActivity() {
     private var matcherReady = false
     private var gpuMatcherAvailable = false
 
+    // FPS tracking
+    private var lastFrameTime: Long = System.nanoTime()
+    private var avgFps: Float = 0f
+
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
             startCamera()
         } else {
-            binding.debugOverlay.text = "Camera permission denied"
+            if (binding.debugOverlay.visibility == View.VISIBLE) {
+                binding.debugOverlay.text = "Camera permission denied"
+            }
         }
     }
 
@@ -51,9 +58,13 @@ class MainActivity : AppCompatActivity() {
         nativeBridge = NativeBridge()
         nativeBridge.nativeInit()
 
+        performanceDashboard = findViewById(R.id.performanceDashboard)
+
         val version = nativeBridge.nativeGetVersion()
         Log.i(TAG, "Native version: $version")
-        binding.debugOverlay.text = "OnyxVO v$version\nLoading model..."
+        if (binding.debugOverlay.visibility == View.VISIBLE) {
+            binding.debugOverlay.text = "OnyxVO v$version\nLoading model..."
+        }
 
         // Initialize FP32 model, then matcher
         initModel(useInt8 = false)
@@ -68,7 +79,9 @@ class MainActivity : AppCompatActivity() {
         binding.toggleModelButton.setOnClickListener {
             useInt8 = !useInt8
             binding.toggleModelButton.text = if (useInt8) "INT8" else "FP32"
-            binding.debugOverlay.text = "Switching model..."
+            if (binding.debugOverlay.visibility == View.VISIBLE) {
+                binding.debugOverlay.text = "Switching model..."
+            }
 
             Thread {
                 val success = nativeBridge.nativeSwitchModel(assets, useInt8)
@@ -164,8 +177,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         cameraManager?.shutdown()
+        nativeBridge.nativeDestroy()
+        super.onDestroy()
     }
 
     private fun hasCameraPermission(): Boolean {
@@ -184,7 +198,9 @@ class MainActivity : AppCompatActivity() {
                     Log.i(TAG, "Model loaded: ${if (useInt8) "INT8" else "FP32"}")
                 } else {
                     Log.e(TAG, "Model loading failed")
-                    binding.debugOverlay.text = "OnyxVO v${nativeBridge.nativeGetVersion()}\nModel load failed"
+                    if (binding.debugOverlay.visibility == View.VISIBLE) {
+                        binding.debugOverlay.text = "OnyxVO v${nativeBridge.nativeGetVersion()}\nModel load failed"
+                    }
                 }
             }
             // Initialize matcher and VO after model
@@ -248,72 +264,61 @@ class MainActivity : AppCompatActivity() {
                         else avgPoseUs * (1 - SMOOTHING) + result.poseTimeUs * SMOOTHING
         }
 
-        // Update trajectory view
-        if (result.trajectoryXZ.isNotEmpty()) {
-            binding.trajectoryView.updateTrajectory(result.trajectoryXZ)
-        }
+        // Calculate FPS
+        val currentTime = System.nanoTime()
+        val deltaMs = (currentTime - lastFrameTime) / 1_000_000f
+        lastFrameTime = currentTime
+        val instantFps = if (deltaMs > 0) 1000f / deltaMs else 0f
+        avgFps = if (frameCount == 1L) instantFps
+                 else avgFps * (1 - SMOOTHING) + instantFps * SMOOTHING
 
-        // Update keypoint overlay
-        if (result.keypointCoords.isNotEmpty()) {
-            binding.keypointOverlay.updateKeypoints(
-                result.keypointCoords, 640, 480,
-                result.width, result.height, result.rotationDegrees
-            )
-        }
+        // Capture values needed for UI on the worker thread
+        val kpCoords = result.keypointCoords
+        val matchLineData = result.matchLines
+        val trajData = result.trajectoryXZ
+        val dashData = DashboardData(
+            fps = avgFps,
+            preprocessUs = result.resizeTimeUs,
+            inferenceUs = result.inferenceTimeUs,
+            matchingUs = result.matchingTimeUs,
+            poseUs = result.poseTimeUs,
+            totalUs = avgTotalUs,
+            keypointCount = result.keypointCount,
+            matchCount = result.matchCount,
+            inlierCount = result.inlierCount,
+            keyframeCount = result.keyframeCount,
+            budgetExceeded = result.budgetExceeded,
+            modelType = if (useInt8) "INT8" else "FP32",
+            matcherType = if (binding.toggleMatcherButton.text == "GPU") "GPU" else "CPU",
+            useNeon = binding.toggleNeonButton.text == "NEON"
+        )
+        val camW = result.width
+        val camH = result.height
+        val rotation = result.rotationDegrees
 
-        // Update match lines overlay
-        if (result.matchLines.isNotEmpty()) {
-            binding.keypointOverlay.updateMatches(result.matchLines)
-        } else {
-            binding.keypointOverlay.updateMatches(FloatArray(0))
-        }
-
-        val now = System.currentTimeMillis()
-        if (now - lastUiUpdate < 200) return // Update UI ~5 times per second
-        lastUiUpdate = now
-
-        val formatName = when (result.format) {
-            ImageFormat.YUV_420_888 -> "YUV_420_888"
-            else -> "fmt=${result.format}"
-        }
-        val mode = if (result.useNeon) "NEON" else "Scalar"
-        val modelName = if (useInt8) "INT8" else "FP32"
-        val matcherMode = if (gpuMatcherAvailable && binding.toggleMatcherButton.text == "GPU") "GPU" else "CPU"
-
-        val text = buildString {
-            append("OnyxVO v${nativeBridge.nativeGetVersion()}\n")
-            append("${result.width}x${result.height} $formatName -> 640x480\n")
-            append("Mode: $mode | Model: $modelName | Match: $matcherMode\n")
-
-            if (result.inferenceTimeUs > 0) {
-                append(String.format("Preproc: %.1f ms | Infer: %.1f ms\n",
-                    result.resizeTimeUs / 1000, result.inferenceTimeUs / 1000))
-                if (result.matchingTimeUs > 0) {
-                    append(String.format("Match: %.1f ms | Pose: %.1f ms\n",
-                        result.matchingTimeUs / 1000, result.poseTimeUs / 1000))
-                }
-                append(String.format("Total: %.1f ms (avg %.1f ms)\n",
-                    result.totalTimeUs / 1000, avgTotalUs / 1000))
-                append("KP: ${result.keypointCount}")
-                if (result.matchCount > 0) {
-                    append(" | Match: ${result.matchCount}")
-                }
-                if (result.inlierCount > 0) {
-                    append(" | Inlier: ${result.inlierCount}")
-                }
-                if (result.keyframeCount > 0) {
-                    append("\nKeyframes: ${result.keyframeCount}")
-                }
-            } else {
-                append(String.format("Resize: %.0f us | Norm: %.0f us\n",
-                    result.resizeTimeUs, result.normalizeTimeUs))
-                append(String.format("Total: %.0f us (avg %.1f ms)",
-                    result.totalTimeUs, avgTotalUs / 1000))
-            }
-        }
-
+        // Dispatch ALL view updates to UI thread
         runOnUiThread {
-            binding.debugOverlay.text = text
+            // Trajectory view
+            if (trajData.isNotEmpty()) {
+                binding.trajectoryView.updateTrajectory(trajData)
+            }
+
+            // Keypoint overlay
+            if (kpCoords.isNotEmpty()) {
+                binding.keypointOverlay.updateKeypoints(
+                    kpCoords, 640, 480, camW, camH, rotation
+                )
+            }
+
+            // Match lines overlay
+            if (matchLineData.isNotEmpty()) {
+                binding.keypointOverlay.updateMatches(matchLineData)
+            } else {
+                binding.keypointOverlay.updateMatches(FloatArray(0))
+            }
+
+            // Performance dashboard
+            performanceDashboard.updateData(dashData)
         }
     }
 }

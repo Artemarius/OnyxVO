@@ -44,18 +44,18 @@ class KeypointOverlayView @JvmOverloads constructor(
         cameraWidth = camW
         cameraHeight = camH
         rotationDegrees = rotation
-        postInvalidate()
+        invalidate()
     }
 
     fun updateMatches(lines: FloatArray) {
         matchLines = lines
-        postInvalidate()
+        invalidate()
     }
 
     fun clear() {
         keypoints = null
         matchLines = null
-        postInvalidate()
+        invalidate()
     }
 
     // Transform model-space (mx, my) to view-space, matching PreviewView FILL_CENTER.

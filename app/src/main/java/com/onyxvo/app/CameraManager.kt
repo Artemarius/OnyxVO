@@ -44,6 +44,8 @@ class CameraManager(
         val inlierCount: Int = 0,
         val keyframeCount: Int = 0,
         val trajectoryXZ: FloatArray = FloatArray(0),
+        // Phase 6 additions
+        val budgetExceeded: Boolean = false,
         // Sensor rotation (degrees CW to match display)
         val rotationDegrees: Int = 0
     )
@@ -133,7 +135,7 @@ class CameraManager(
                     yBuffer, width, height, rowStride, useNeon
                 )
 
-                if (result != null && result.size >= 9) {
+                if (result != null && result.size >= 10) {
                     val preprocessUs = result[0]
                     val inferenceUs = result[1]
                     val matchingUs = result[2]
@@ -143,9 +145,10 @@ class CameraManager(
                     val inlierCount = result[6].toInt()
                     val keyframeCount = result[7].toInt()
                     val trajectoryCount = result[8].toInt()
+                    val budgetExceeded = result[9] > 0.5f
 
                     // Extract keypoint coordinates (packed as x0,y0,x1,y1,...)
-                    val kpStart = 9
+                    val kpStart = 10
                     val kpEnd = kpStart + kpCount * 2
                     val kpCoords = if (kpCount > 0 && result.size >= kpEnd) {
                         result.copyOfRange(kpStart, kpEnd)
@@ -190,6 +193,7 @@ class CameraManager(
                             inlierCount = inlierCount,
                             keyframeCount = keyframeCount,
                             trajectoryXZ = trajectoryXZ,
+                            budgetExceeded = budgetExceeded,
                             rotationDegrees = imageProxy.imageInfo.rotationDegrees
                         )
                     )

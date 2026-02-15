@@ -25,7 +25,17 @@
         app:layout_constraintStart_toStartOf="@id/cameraPreview"
         app:layout_constraintTop_toTopOf="@id/cameraPreview" />
 
-    <!-- Debug overlay: timing stats -->
+    <!-- Performance dashboard (graphical replacement for text-based debug overlay) -->
+    <com.onyxvo.app.PerformanceDashboardView
+        android:id="@+id/performanceDashboard"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="8dp"
+        android:visibility="visible"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Debug overlay: timing stats (hidden, kept as fallback) -->
     <TextView
         android:id="@+id/debugOverlay"
         android:layout_width="wrap_content"
@@ -37,6 +47,7 @@
         android:text="OnyxVO"
         android:textColor="@android:color/white"
         android:textSize="12sp"
+        android:visibility="gone"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
