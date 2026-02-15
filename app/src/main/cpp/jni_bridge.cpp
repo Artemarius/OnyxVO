@@ -44,6 +44,24 @@ struct PreprocessState {
 
 PreprocessState g_preprocess;
 
+// Pre-allocated staging buffer for nativeProcessFrame JNI output packing.
+// Avoids per-frame C++ heap allocation (~14KB) on the hot path.
+struct JniOutputState {
+    std::unique_ptr<float[]> staging;
+    int capacity = 0;
+
+    float* ensure(int needed) {
+        if (needed > capacity) {
+            // Allocate with headroom to avoid frequent realloc
+            capacity = needed + 1024;
+            staging.reset(new float[capacity]);
+        }
+        return staging.get();
+    }
+};
+
+JniOutputState g_jni_output;
+
 // Default normalization: maps [0, 255] -> [0.0, 1.0]
 constexpr float kDefaultMean = 0.0f;
 constexpr float kDefaultStd  = 255.0f;
@@ -70,6 +88,7 @@ Java_com_onyxvo_app_NativeBridge_nativeGetVersion(JNIEnv* env, jobject /* thiz *
 JNIEXPORT void JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeDestroy(JNIEnv*, jobject) {
     g_pipeline.reset();
+    g_jni_output = {};  // release staging buffer
     LOGI("Pipeline destroyed");
 }
 
@@ -434,7 +453,7 @@ Java_com_onyxvo_app_NativeBridge_nativeProcessFrame(
     jfloatArray result = env->NewFloatArray(result_size);
     if (!result) return nullptr;
 
-    auto data = std::make_unique<float[]>(result_size);
+    float* data = g_jni_output.ensure(result_size);
     data[0]  = static_cast<float>(stats.preprocess_us);
     data[1]  = static_cast<float>(stats.inference_us);
     data[2]  = static_cast<float>(stats.matching_us);
@@ -481,7 +500,7 @@ Java_com_onyxvo_app_NativeBridge_nativeProcessFrame(
         data[off + 3] = frame.trajectory_points[i].inlier_ratio;
     }
 
-    env->SetFloatArrayRegion(result, 0, result_size, data.get());
+    env->SetFloatArrayRegion(result, 0, result_size, data);
 
     return result;
 }

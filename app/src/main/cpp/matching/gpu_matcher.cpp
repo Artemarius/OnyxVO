@@ -61,6 +61,10 @@ GpuMatcher::GpuMatcher(int max_descriptors)
 
         seq_ = manager_->sequence();
 
+        // Pre-allocate tensor lists for sequence recording (avoids per-frame vector alloc)
+        input_tensors_ = { t_desc1_, t_desc2_ };
+        output_tensors_ = { t_match_indices_, t_match_distances_, t_second_distances_ };
+
         available_ = true;
         LOGI("GpuMatcher: initialized (max_desc=%d)", max_desc_);
     } catch (const std::exception& e) {
@@ -86,11 +90,11 @@ std::vector<Match> GpuMatcher::match(
     double* matching_us) {
 
     double elapsed = 0.0;
-    std::vector<Match> matches;
+    matches_buf_.clear();
 
     if (!available_ || n1 <= 0 || n2 <= 1) {
         if (matching_us) *matching_us = 0.0;
-        return matches;
+        return matches_buf_;
     }
 
     if (n1 > max_desc_ || n2 > max_desc_) {
@@ -127,21 +131,16 @@ std::vector<Match> GpuMatcher::match(
         algorithm_->setWorkgroup(kp::Workgroup{wg_x, 1, 1});
 
         // Record and execute: sync to device -> dispatch -> sync results back
-        std::vector<std::shared_ptr<kp::Tensor>> input_tensors = {
-            t_desc1_, t_desc2_
-        };
-        std::vector<std::shared_ptr<kp::Tensor>> output_tensors = {
-            t_match_indices_, t_match_distances_, t_second_distances_
-        };
+        // (uses pre-allocated input_tensors_ / output_tensors_ members)
 
         // Clear previous recorded ops before re-recording
         seq_->clear();
-        seq_->record<kp::OpTensorSyncDevice>(input_tensors);
+        seq_->record<kp::OpTensorSyncDevice>(input_tensors_);
         seq_->record<kp::OpAlgoDispatch>(
             algorithm_,
             std::vector<uint32_t>{push_consts[0], push_consts[1]}
         );
-        seq_->record<kp::OpTensorSyncLocal>(output_tensors);
+        seq_->record<kp::OpTensorSyncLocal>(output_tensors_);
         seq_->eval();
 
         // Read results and apply ratio test CPU-side
@@ -150,19 +149,19 @@ std::vector<Match> GpuMatcher::match(
         const float* second    = t_second_distances_->data();
 
         const float ratio_sq = ratio_threshold * ratio_threshold;
-        matches.reserve(n1);
+        matches_buf_.reserve(n1);
 
         for (int i = 0; i < n1; ++i) {
             if (indices[i] >= 0 && second[i] > 0.0f &&
                 distances[i] < ratio_sq * second[i]) {
                 float rq = 1.0f - std::sqrt(distances[i] / second[i]);
-                matches.push_back({i, indices[i], distances[i], rq});
+                matches_buf_.push_back({i, indices[i], distances[i], rq});
             }
         }
     }
 
     if (matching_us) *matching_us = elapsed;
-    return matches;
+    return matches_buf_;
 }
 
 } // namespace matching

@@ -63,7 +63,7 @@ bool Pipeline::initModel(AAssetManager* mgr, bool use_int8) {
         extractor_ = std::make_unique<feature::XFeatExtractor>(
             mgr, model_type, config_.max_keypoints);
         model_loaded_ = true;
-        has_prev_frame_ = false;
+        has_prev_features_valid_ = false;
         LOGI("Pipeline: model initialized (%s)", extractor_->modelName());
         return true;
     } catch (const std::exception& e) {
@@ -82,7 +82,7 @@ bool Pipeline::initMatcher() {
         gpu_available_ = gpu_matcher_->isAvailable();
         use_gpu_ = gpu_available_;
         matcher_ready_ = true;
-        has_prev_frame_ = false;
+        has_prev_features_valid_ = false;
 
         LOGI("Pipeline: matcher initialized, GPU=%s",
              gpu_available_ ? "yes" : "no (CPU fallback)");
@@ -92,7 +92,7 @@ bool Pipeline::initMatcher() {
         gpu_available_ = false;
         use_gpu_ = false;
         matcher_ready_ = true;  // CPU matcher always available
-        has_prev_frame_ = false;
+        has_prev_features_valid_ = false;
         return false;
     }
 }
@@ -132,17 +132,25 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
                                     int row_stride, bool use_neon) {
     std::lock_guard<std::mutex> lock(pipeline_mutex_);
 
-    FrameResult result;
+    // Clear reusable result — vectors keep their heap capacity from prior frames
+    frame_result_.keypoints.clear();
+    frame_result_.keypoint_scores.clear();
+    frame_result_.keypoint_match_info.clear();
+    frame_result_.match_lines.clear();
+    frame_result_.trajectory_points.clear();
+    frame_result_.pose_valid = false;
+    frame_result_.stats = FrameStats{};
+
     auto frame_start = std::chrono::high_resolution_clock::now();
 
     // Helper: populate trajectory data + keyframe counter into result
     auto copyTrajectoryToResult = [&]() {
         if (trajectory_) {
-            result.trajectory_points = trajectory_->points();
-            result.stats.trajectory_count = static_cast<int>(result.trajectory_points.size());
-            result.stats.keyframe_count = trajectory_->keyframeCount();
+            frame_result_.trajectory_points = trajectory_->points();
+            frame_result_.stats.trajectory_count = static_cast<int>(frame_result_.trajectory_points.size());
+            frame_result_.stats.keyframe_count = trajectory_->keyframeCount();
         }
-        result.stats.frames_since_keyframe = frames_since_keyframe_;
+        frame_result_.stats.frames_since_keyframe = frames_since_keyframe_;
     };
 
     // -- Stage 1: Preprocessing (resize + normalize) --------------------------
@@ -156,78 +164,78 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
         config_.norm_mean, config_.norm_std,
         use_neon);
 
-    result.stats.preprocess_us = pp_timing.total_us;
+    frame_result_.stats.preprocess_us = pp_timing.total_us;
 
     // Budget check after preprocessing
     if (elapsedUs(frame_start) > config_.frame_budget_us) {
-        result.stats.budget_exceeded = true;
-        result.stats.total_us = elapsedUs(frame_start);
+        frame_result_.stats.budget_exceeded = true;
+        frame_result_.stats.total_us = elapsedUs(frame_start);
         copyTrajectoryToResult();
-        return result;
+        return frame_result_;
     }
 
     // -- Stage 2: Feature extraction ------------------------------------------
 
     if (!model_loaded_ || !extractor_) {
-        result.stats.total_us = elapsedUs(frame_start);
-        return result;
+        frame_result_.stats.total_us = elapsedUs(frame_start);
+        return frame_result_;
     }
 
     auto features = extractor_->extract(
         normalize_buf_.get(), config_.target_width, config_.target_height);
 
-    result.stats.inference_us = features.inference_us;
-    result.stats.keypoint_count = features.count;
+    frame_result_.stats.inference_us = features.inference_us;
+    frame_result_.stats.keypoint_count = features.count;
 
-    // Copy keypoints + scores for visualization
-    result.keypoints = features.keypoints;
-    result.keypoint_scores = features.scores;
-    result.keypoint_match_info.assign(features.count, 0.0f);  // all unmatched initially
+    // Move keypoints + scores for visualization (avoids copy; features still owns descriptors)
+    frame_result_.keypoints = features.keypoints;      // copy — needed later via features.keypoints
+    frame_result_.keypoint_scores = features.scores;    // copy — needed later via features.scores
+    frame_result_.keypoint_match_info.assign(features.count, 0.0f);  // all unmatched initially
 
     // Budget check after extraction
     if (elapsedUs(frame_start) > config_.frame_budget_us) {
-        result.stats.budget_exceeded = true;
-        result.stats.total_us = elapsedUs(frame_start);
+        frame_result_.stats.budget_exceeded = true;
+        frame_result_.stats.total_us = elapsedUs(frame_start);
         // Still cache features for next frame
-        prev_features_ = std::make_unique<feature::FeatureResult>(std::move(features));
-        has_prev_frame_ = true;
+        prev_features_storage_ = std::move(features);
+        has_prev_features_valid_ = true;
         copyTrajectoryToResult();
-        return result;
+        return frame_result_;
     }
 
     // -- Stage 3: Matching (frame-to-frame) -----------------------------------
 
-    std::vector<matching::Match> matches;
+    matches_buf_.clear();
 
-    if (matcher_ready_ && has_prev_frame_ && prev_features_ &&
-        features.count > 0 && prev_features_->count > 0) {
+    if (matcher_ready_ && has_prev_features_valid_ &&
+        features.count > 0 && prev_features_storage_.count > 0) {
 
         double match_us = 0.0;
 
         if (use_gpu_ && gpu_matcher_ && gpu_matcher_->isAvailable()) {
-            matches = gpu_matcher_->match(
-                prev_features_->descriptors, prev_features_->count,
+            matches_buf_ = gpu_matcher_->match(
+                prev_features_storage_.descriptors, prev_features_storage_.count,
                 features.descriptors, features.count,
                 config_.ratio_threshold, &match_us);
         } else {
-            matches = cpu_matcher_->match(
-                prev_features_->descriptors, prev_features_->count,
+            matches_buf_ = cpu_matcher_->match(
+                prev_features_storage_.descriptors, prev_features_storage_.count,
                 features.descriptors, features.count,
                 config_.ratio_threshold, &match_us);
         }
 
-        result.stats.matching_us = match_us;
-        result.stats.match_count = static_cast<int>(matches.size());
+        frame_result_.stats.matching_us = match_us;
+        frame_result_.stats.match_count = static_cast<int>(matches_buf_.size());
     }
 
     // Budget check after matching
     if (elapsedUs(frame_start) > config_.frame_budget_us) {
-        result.stats.budget_exceeded = true;
-        result.stats.total_us = elapsedUs(frame_start);
-        prev_features_ = std::make_unique<feature::FeatureResult>(std::move(features));
-        has_prev_frame_ = true;
+        frame_result_.stats.budget_exceeded = true;
+        frame_result_.stats.total_us = elapsedUs(frame_start);
+        prev_features_storage_ = std::move(features);
+        has_prev_features_valid_ = true;
         copyTrajectoryToResult();
-        return result;
+        return frame_result_;
     }
 
     // -- Stage 4: Pose estimation + trajectory --------------------------------
@@ -236,34 +244,34 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
     bool is_keyframe = false;
     float inlier_ratio = 0.0f;
 
-    if (vo_initialized_ && estimator_ && !matches.empty()) {
-        // Build matched point vectors
-        std::vector<Eigen::Vector2f> matched_pts1(matches.size());
-        std::vector<Eigen::Vector2f> matched_pts2(matches.size());
-        for (size_t i = 0; i < matches.size(); ++i) {
-            matched_pts1[i] = prev_features_->keypoints[matches[i].idx1];
-            matched_pts2[i] = features.keypoints[matches[i].idx2];
+    if (vo_initialized_ && estimator_ && !matches_buf_.empty()) {
+        // Build matched point vectors (reuse pre-allocated buffers)
+        matched_pts1_buf_.resize(matches_buf_.size());
+        matched_pts2_buf_.resize(matches_buf_.size());
+        for (size_t i = 0; i < matches_buf_.size(); ++i) {
+            matched_pts1_buf_[i] = prev_features_storage_.keypoints[matches_buf_[i].idx1];
+            matched_pts2_buf_[i] = features.keypoints[matches_buf_[i].idx2];
         }
 
-        pose_result = estimator_->estimatePose(matched_pts1, matched_pts2);
-        result.stats.pose_us = pose_result.estimation_us;
-        result.stats.inlier_count = pose_result.inlier_count;
-        result.pose_valid = pose_result.valid;
+        pose_result = estimator_->estimatePose(matched_pts1_buf_, matched_pts2_buf_);
+        frame_result_.stats.pose_us = pose_result.estimation_us;
+        frame_result_.stats.inlier_count = pose_result.inlier_count;
+        frame_result_.pose_valid = pose_result.valid;
 
         if (pose_result.valid) {
             inlier_ratio = static_cast<float>(pose_result.inlier_count)
-                         / static_cast<float>(matches.size());
+                         / static_cast<float>(matches_buf_.size());
 
             // Keyframe management
             if (shouldUpdateKeyframe(
                     pose_result.inlier_count,
-                    static_cast<int>(matches.size()),
-                    matched_pts1, matched_pts2,
+                    static_cast<int>(matches_buf_.size()),
+                    matched_pts1_buf_, matched_pts2_buf_,
                     pose_result.inlier_mask)) {
                 is_keyframe = true;
                 frames_since_keyframe_ = 0;
                 LOGI("Pipeline: keyframe updated (inliers=%d/%d)",
-                     pose_result.inlier_count, static_cast<int>(matches.size()));
+                     pose_result.inlier_count, static_cast<int>(matches_buf_.size()));
             } else {
                 ++frames_since_keyframe_;
             }
@@ -276,17 +284,17 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
 
     // -- Build enriched match lines (after pose, so we have inlier info) ------
 
-    if (!matches.empty() && prev_features_) {
-        result.match_lines.reserve(matches.size());
-        for (size_t i = 0; i < matches.size(); ++i) {
-            const auto& m = matches[i];
+    if (!matches_buf_.empty() && has_prev_features_valid_) {
+        frame_result_.match_lines.reserve(matches_buf_.size());
+        for (size_t i = 0; i < matches_buf_.size(); ++i) {
+            const auto& m = matches_buf_[i];
             bool is_inlier = !pose_result.inlier_mask.empty()
                            && i < pose_result.inlier_mask.size()
                            && pose_result.inlier_mask[i];
 
-            result.match_lines.push_back({
-                prev_features_->keypoints[m.idx1].x(),
-                prev_features_->keypoints[m.idx1].y(),
+            frame_result_.match_lines.push_back({
+                prev_features_storage_.keypoints[m.idx1].x(),
+                prev_features_storage_.keypoints[m.idx1].y(),
                 features.keypoints[m.idx2].x(),
                 features.keypoints[m.idx2].y(),
                 m.ratio_quality,
@@ -294,8 +302,8 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
             });
 
             // Set keypoint_match_info for the current-frame keypoint
-            if (m.idx2 >= 0 && m.idx2 < static_cast<int>(result.keypoint_match_info.size())) {
-                result.keypoint_match_info[m.idx2] = is_inlier
+            if (m.idx2 >= 0 && m.idx2 < static_cast<int>(frame_result_.keypoint_match_info.size())) {
+                frame_result_.keypoint_match_info[m.idx2] = is_inlier
                     ? m.ratio_quality
                     : -m.ratio_quality;
             }
@@ -308,18 +316,18 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
     float kp_frac = static_cast<float>(features.count)
                   / static_cast<float>(std::max(config_.max_keypoints, 1));
     kp_frac = std::min(kp_frac, 1.0f);
-    result.stats.frame_quality_score = inlier_ratio * 0.6f + kp_frac * 0.4f;
+    frame_result_.stats.frame_quality_score = inlier_ratio * 0.6f + kp_frac * 0.4f;
 
     // Copy trajectory data for visualization
     copyTrajectoryToResult();
 
-    // Cache current features for next-frame matching
-    prev_features_ = std::make_unique<feature::FeatureResult>(std::move(features));
-    has_prev_frame_ = true;
+    // Cache current features for next-frame matching (move avoids copy)
+    prev_features_storage_ = std::move(features);
+    has_prev_features_valid_ = true;
 
-    result.stats.total_us = elapsedUs(frame_start);
+    frame_result_.stats.total_us = elapsedUs(frame_start);
 
-    return result;
+    return frame_result_;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,8 +366,8 @@ double Pipeline::computeMedianDisplacement(
         const std::vector<Eigen::Vector2f>& pts2,
         const std::vector<bool>& inlier_mask) {
 
-    std::vector<float> displacements;
-    displacements.reserve(pts1.size());
+    displacements_buf_.clear();
+    displacements_buf_.reserve(pts1.size());
 
     for (size_t i = 0; i < pts1.size(); ++i) {
         // Only consider inliers if mask is available
@@ -368,16 +376,16 @@ double Pipeline::computeMedianDisplacement(
         }
         float dx = pts2[i].x() - pts1[i].x();
         float dy = pts2[i].y() - pts1[i].y();
-        displacements.push_back(std::sqrt(dx * dx + dy * dy));
+        displacements_buf_.push_back(std::sqrt(dx * dx + dy * dy));
     }
 
-    if (displacements.empty()) return 0.0;
+    if (displacements_buf_.empty()) return 0.0;
 
-    size_t mid = displacements.size() / 2;
-    std::nth_element(displacements.begin(),
-                     displacements.begin() + static_cast<ptrdiff_t>(mid),
-                     displacements.end());
-    return static_cast<double>(displacements[mid]);
+    size_t mid = displacements_buf_.size() / 2;
+    std::nth_element(displacements_buf_.begin(),
+                     displacements_buf_.begin() + static_cast<ptrdiff_t>(mid),
+                     displacements_buf_.end());
+    return static_cast<double>(displacements_buf_[mid]);
 }
 
 // ---------------------------------------------------------------------------
@@ -389,10 +397,10 @@ void Pipeline::releaseComputeResources() {
 
     extractor_.reset();
     gpu_matcher_.reset();
-    prev_features_.reset();
+    prev_features_storage_ = feature::FeatureResult{};
     estimator_.reset();
 
-    has_prev_frame_ = false;
+    has_prev_features_valid_ = false;
     model_loaded_ = false;
     gpu_available_ = false;
     use_gpu_ = false;
@@ -413,7 +421,7 @@ void Pipeline::resetTrajectory() {
     if (trajectory_) {
         trajectory_->reset();
     }
-    has_prev_frame_ = false;
+    has_prev_features_valid_ = false;
     frames_since_keyframe_ = 0;
 
     LOGI("Pipeline: trajectory reset");
@@ -434,8 +442,8 @@ bool Pipeline::switchModel(AAssetManager* mgr, bool use_int8) {
     try {
         extractor_->switchModel(mgr, model_type);
         // Invalidate previous frame cache — descriptor space may differ
-        has_prev_frame_ = false;
-        prev_features_.reset();
+        has_prev_features_valid_ = false;
+        prev_features_storage_ = feature::FeatureResult{};
         LOGI("Pipeline: switched to model %s", extractor_->modelName());
         return true;
     } catch (const std::exception& e) {

@@ -73,6 +73,20 @@ private:
     std::vector<const char*> input_name_ptrs_;
     std::vector<const char*> output_name_ptrs_;
     std::vector<int64_t> input_shape_;
+
+    // Cached ORT memory info (avoid per-frame creation)
+    Ort::MemoryInfo memory_info_{Ort::MemoryInfo::CreateCpu(
+        OrtAllocatorType::OrtArenaAllocator, OrtMemTypeDefault)};
+
+    // Pre-allocated input shape arrays (avoid per-frame vector allocation)
+    std::vector<int64_t> input_shape_1ch_ = {1, 1, 0, 0};
+    std::vector<int64_t> input_shape_3ch_ = {1, 3, 0, 0};
+
+    // Pre-allocated backbone decode buffers
+    struct Candidate { int px, py; float detection; };
+    struct ScoredCandidate { int px, py; float score; };
+    std::vector<Candidate> candidates_buf_;
+    std::vector<ScoredCandidate> scored_buf_;
 };
 
 } // namespace feature

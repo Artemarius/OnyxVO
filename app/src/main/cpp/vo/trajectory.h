@@ -23,7 +23,7 @@ public:
                 float inlier_ratio = 0.0f, bool is_keyframe = false);
     void reset();
 
-    const std::vector<TrajectoryPoint>& points() const { return points_; }
+    std::vector<TrajectoryPoint> points() const;
 
     // Backward-compat: extract just positions from points
     std::vector<Eigen::Vector3d> positions() const;
@@ -37,7 +37,9 @@ public:
 private:
     Eigen::Matrix3d R_world_;
     Eigen::Vector3d t_world_;
-    std::vector<TrajectoryPoint> points_;
+    std::vector<TrajectoryPoint> ring_buf_;
+    int head_ = 0;   // index of oldest element
+    int size_ = 0;   // number of valid elements
     int max_positions_;
     int keyframe_count_;
 

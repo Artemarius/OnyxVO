@@ -45,6 +45,11 @@ private:
     std::shared_ptr<kp::TensorT<float>> t_second_distances_;
     std::shared_ptr<kp::Algorithm>      algorithm_;
     std::shared_ptr<kp::Sequence>       seq_;
+
+    // Pre-allocated buffers to avoid per-frame allocation
+    std::vector<Match> matches_buf_;
+    std::vector<std::shared_ptr<kp::Tensor>> input_tensors_;
+    std::vector<std::shared_ptr<kp::Tensor>> output_tensors_;
 };
 
 } // namespace matching

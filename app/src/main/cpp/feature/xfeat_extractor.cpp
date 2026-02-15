@@ -15,12 +15,19 @@ XFeatExtractor::XFeatExtractor(AAssetManager* asset_mgr, ModelType type,
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "OnyxVO");
 
     // Session options: optimize graph, single thread (mobile CPU)
+    // Note: XNNPACK EP was tested but doesn't support INT8 quantized models
+    // (FusedNodeAndGraph compile failure). Default CPU EP with full graph
+    // optimization is well-tuned for ARM via ONNX Runtime's internal NEON kernels.
     session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     session_options_.SetIntraOpNumThreads(1);
     session_options_.SetInterOpNumThreads(1);
 
     // Pre-allocate full-res heatmap (480*640)
     heatmap_full_.resize(480 * 640, 0.0f);
+
+    // Pre-allocate backbone decode buffers
+    candidates_buf_.reserve(4096);
+    scored_buf_.reserve(4096);
 
     loadModel(asset_mgr, type);
 }
@@ -130,9 +137,6 @@ FeatureResult XFeatExtractor::extract(const float* image, int w, int h) {
     {
         ScopedTimer timer(inference_us);
 
-        auto memory_info = Ort::MemoryInfo::CreateCpu(
-            OrtAllocatorType::OrtArenaAllocator, OrtMemTypeDefault);
-
         Ort::Value input_tensor{nullptr};
         const int pixel_count = w * h;
 
@@ -144,16 +148,18 @@ FeatureResult XFeatExtractor::extract(const float* image, int w, int h) {
             std::memcpy(rgb_buffer_.data() + channel_size, image, channel_size * sizeof(float));
             std::memcpy(rgb_buffer_.data() + 2 * channel_size, image, channel_size * sizeof(float));
 
-            std::vector<int64_t> shape = {1, 3, h, w};
+            input_shape_3ch_[2] = h;
+            input_shape_3ch_[3] = w;
             input_tensor = Ort::Value::CreateTensor<float>(
-                memory_info, rgb_buffer_.data(),
-                rgb_buffer_.size(), shape.data(), shape.size());
+                memory_info_, rgb_buffer_.data(),
+                rgb_buffer_.size(), input_shape_3ch_.data(), input_shape_3ch_.size());
         } else {
             // Model expects [1, 1, H, W]: zero-copy wrap of preprocessed buffer
-            std::vector<int64_t> shape = {1, 1, h, w};
+            input_shape_1ch_[2] = h;
+            input_shape_1ch_[3] = w;
             input_tensor = Ort::Value::CreateTensor<float>(
-                memory_info, const_cast<float*>(image),
-                static_cast<size_t>(pixel_count), shape.data(), shape.size());
+                memory_info_, const_cast<float*>(image),
+                static_cast<size_t>(pixel_count), input_shape_1ch_.data(), input_shape_1ch_.size());
         }
 
         // Run inference
@@ -208,12 +214,7 @@ FeatureResult XFeatExtractor::extract(const float* image, int w, int h) {
             constexpr int kNmsRadius = 2;  // 5x5 kernel
             constexpr float kDetThreshold = 0.05f;
 
-            struct Candidate {
-                int px, py;
-                float detection;
-            };
-            std::vector<Candidate> candidates;
-            candidates.reserve(4096);
+            candidates_buf_.clear();
 
             for (int py = kNmsRadius; py < full_h - kNmsRadius; ++py) {
                 for (int px = kNmsRadius; px < full_w - kNmsRadius; ++px) {
@@ -231,30 +232,25 @@ FeatureResult XFeatExtractor::extract(const float* image, int w, int h) {
                         }
                     }
                     if (is_max) {
-                        candidates.push_back({px, py, val});
+                        candidates_buf_.push_back({px, py, val});
                     }
                 }
             }
 
             // Step 3: Score = detection * reliability (bilinear-sampled)
-            struct ScoredCandidate {
-                int px, py;
-                float score;
-            };
-            std::vector<ScoredCandidate> scored;
-            scored.reserve(candidates.size());
+            scored_buf_.clear();
 
-            for (auto& c : candidates) {
+            for (auto& c : candidates_buf_) {
                 float fx = static_cast<float>(c.px) / 8.0f;
                 float fy = static_cast<float>(c.py) / 8.0f;
                 float reliability = bilinearSample(rel_data, feat_w, feat_h, fx, fy);
-                scored.push_back({c.px, c.py, c.detection * reliability});
+                scored_buf_.push_back({c.px, c.py, c.detection * reliability});
             }
 
             // Step 4: Top-K by score
-            int n = std::min(static_cast<int>(scored.size()), max_keypoints_);
+            int n = std::min(static_cast<int>(scored_buf_.size()), max_keypoints_);
             if (n > 0) {
-                std::partial_sort(scored.begin(), scored.begin() + n, scored.end(),
+                std::partial_sort(scored_buf_.begin(), scored_buf_.begin() + n, scored_buf_.end(),
                     [](const ScoredCandidate& a, const ScoredCandidate& b) {
                         return a.score > b.score;
                     });
@@ -268,13 +264,13 @@ FeatureResult XFeatExtractor::extract(const float* image, int w, int h) {
             // Step 5: Descriptor interpolation + L2 normalize
             for (int i = 0; i < n; ++i) {
                 result.keypoints[i] = Eigen::Vector2f(
-                    static_cast<float>(scored[i].px),
-                    static_cast<float>(scored[i].py));
-                result.scores[i] = scored[i].score;
+                    static_cast<float>(scored_buf_[i].px),
+                    static_cast<float>(scored_buf_[i].py));
+                result.scores[i] = scored_buf_[i].score;
 
                 // Bilinear-sample 64-dim descriptor from feats[0,:,feat_h,feat_w]
-                float fx = static_cast<float>(scored[i].px) / 8.0f;
-                float fy = static_cast<float>(scored[i].py) / 8.0f;
+                float fx = static_cast<float>(scored_buf_[i].px) / 8.0f;
+                float fy = static_cast<float>(scored_buf_[i].py) / 8.0f;
 
                 float norm_sq = 0.0f;
                 for (int d = 0; d < 64; ++d) {

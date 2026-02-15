@@ -22,6 +22,13 @@ void main() {
 
     uint base1 = idx * 64u;
 
+    // Cache desc1[idx] into registers — read once from global memory instead of n2 times
+    vec4 d1_cache[16];
+    for (uint k = 0u; k < 16u; ++k) {
+        uint off = base1 + k * 4u;
+        d1_cache[k] = vec4(desc1[off], desc1[off + 1u], desc1[off + 2u], desc1[off + 3u]);
+    }
+
     float best_dist   = 3.402823466e+38;  // FLT_MAX
     float second_dist = 3.402823466e+38;
     int   best_idx    = -1;
@@ -29,15 +36,24 @@ void main() {
     for (uint j = 0u; j < n2; ++j) {
         uint base2 = j * 64u;
         float dist = 0.0;
+        bool early_out = false;
 
-        // Unrolled 4-wide accumulation for GPU SIMD
-        for (uint k = 0u; k < 64u; k += 4u) {
-            float d0 = desc1[base1 + k]     - desc2[base2 + k];
-            float d1 = desc1[base1 + k + 1u] - desc2[base2 + k + 1u];
-            float d2 = desc1[base1 + k + 2u] - desc2[base2 + k + 2u];
-            float d3 = desc1[base1 + k + 3u] - desc2[base2 + k + 3u];
-            dist += d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3;
+        // vec4 accumulation with dot() builtin + early termination
+        for (uint k = 0u; k < 16u; ++k) {
+            uint off = base2 + k * 4u;
+            vec4 d2 = vec4(desc2[off], desc2[off + 1u], desc2[off + 2u], desc2[off + 3u]);
+            vec4 diff = d1_cache[k] - d2;
+            dist += dot(diff, diff);
+
+            // Early termination: if partial distance already exceeds second-best,
+            // this candidate cannot become best or second-best — skip remaining dims
+            if (dist >= second_dist) {
+                early_out = true;
+                break;
+            }
         }
+
+        if (early_out) continue;
 
         if (dist < best_dist) {
             second_dist = best_dist;

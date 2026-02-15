@@ -32,12 +32,14 @@ Eigen::Matrix3d CameraIntrinsics::K_inv() const {
 
 PoseEstimator::PoseEstimator(const CameraIntrinsics& intrinsics)
     : K_(intrinsics), config_(),
-      rng_(std::random_device{}()) {}
+      rng_(std::random_device{}()),
+      sample1_buf_(8), sample2_buf_(8) {}
 
 PoseEstimator::PoseEstimator(const CameraIntrinsics& intrinsics,
                              const Config& config)
     : K_(intrinsics), config_(config),
-      rng_(std::random_device{}()) {}
+      rng_(std::random_device{}()),
+      sample1_buf_(8), sample2_buf_(8) {}
 
 Eigen::Matrix3d PoseEstimator::normalizePoints(
     const std::vector<Eigen::Vector2d>& pts,
@@ -283,59 +285,61 @@ PoseResult PoseEstimator::estimatePose(
         return result;
     }
 
-    // Convert float to double for numerical precision
-    std::vector<Eigen::Vector2d> pts1(n), pts2(n);
+    // Convert float to double for numerical precision (reuse pre-allocated buffers)
+    pts1_buf_.resize(n);
+    pts2_buf_.resize(n);
     for (int i = 0; i < n; ++i) {
-        pts1[i] = pts1_f[i].cast<double>();
-        pts2[i] = pts2_f[i].cast<double>();
+        pts1_buf_[i] = pts1_f[i].cast<double>();
+        pts2_buf_[i] = pts2_f[i].cast<double>();
     }
 
-    // Hartley normalization
-    std::vector<Eigen::Vector2d> pts1_norm, pts2_norm;
-    Eigen::Matrix3d T1 = normalizePoints(pts1, pts1_norm);
-    Eigen::Matrix3d T2 = normalizePoints(pts2, pts2_norm);
+    // Hartley normalization (normalizePoints resizes the output vectors)
+    Eigen::Matrix3d T1 = normalizePoints(pts1_buf_, pts1_norm_buf_);
+    Eigen::Matrix3d T2 = normalizePoints(pts2_buf_, pts2_norm_buf_);
 
     // Convert threshold from pixels to normalized space for RANSAC
     // The threshold is in terms of symmetric epipolar distance (squared pixel error).
     double thresh_sq = config_.inlier_threshold_px * config_.inlier_threshold_px;
 
     Eigen::Matrix3d best_F = Eigen::Matrix3d::Zero();
-    std::vector<bool> best_inlier_mask(n, false);
+    best_inlier_mask_buf_.assign(n, false);
     int best_inliers = 0;
 
-    // Index array for sampling
-    std::vector<int> indices(n);
-    std::iota(indices.begin(), indices.end(), 0);
+    // Index array for sampling (reuse pre-allocated buffer)
+    indices_buf_.resize(n);
+    std::iota(indices_buf_.begin(), indices_buf_.end(), 0);
+
+    // Pre-allocated per-iteration inlier mask
+    iter_inlier_mask_buf_.resize(n);
 
     // RANSAC loop
     for (int iter = 0; iter < config_.ransac_iterations; ++iter) {
         // Fisher-Yates shuffle for first 8 elements
         for (int i = 0; i < 8; ++i) {
             std::uniform_int_distribution<int> dist(i, n - 1);
-            std::swap(indices[i], indices[dist(rng_)]);
+            std::swap(indices_buf_[i], indices_buf_[dist(rng_)]);
         }
 
-        // Build 8-point sample
-        std::vector<Eigen::Vector2d> sample1(8), sample2(8);
+        // Build 8-point sample (reuse pre-allocated buffers, size always 8)
         for (int i = 0; i < 8; ++i) {
-            sample1[i] = pts1_norm[indices[i]];
-            sample2[i] = pts2_norm[indices[i]];
+            sample1_buf_[i] = pts1_norm_buf_[indices_buf_[i]];
+            sample2_buf_[i] = pts2_norm_buf_[indices_buf_[i]];
         }
 
         // Compute fundamental matrix from normalized points
-        Eigen::Matrix3d F_norm = computeFundamental8pt(sample1, sample2);
+        Eigen::Matrix3d F_norm = computeFundamental8pt(sample1_buf_, sample2_buf_);
         F_norm = enforceRank2(F_norm);
 
         // Denormalize: F = T2^T * F_norm * T1
         Eigen::Matrix3d F = T2.transpose() * F_norm * T1;
 
-        // Count inliers
+        // Count inliers (reuse pre-allocated mask, clear first)
         int inlier_count = 0;
-        std::vector<bool> inlier_mask(n, false);
+        std::fill(iter_inlier_mask_buf_.begin(), iter_inlier_mask_buf_.end(), false);
         for (int i = 0; i < n; ++i) {
-            double d = symmetricEpipolarDist(F, pts1[i], pts2[i]);
+            double d = symmetricEpipolarDist(F, pts1_buf_[i], pts2_buf_[i]);
             if (d < thresh_sq) {
-                inlier_mask[i] = true;
+                iter_inlier_mask_buf_[i] = true;
                 inlier_count++;
             }
         }
@@ -343,7 +347,7 @@ PoseResult PoseEstimator::estimatePose(
         if (inlier_count > best_inliers) {
             best_inliers = inlier_count;
             best_F = F;
-            best_inlier_mask = inlier_mask;
+            best_inlier_mask_buf_ = iter_inlier_mask_buf_;
         }
     }
 
@@ -353,7 +357,7 @@ PoseResult PoseEstimator::estimatePose(
         auto t_end = std::chrono::high_resolution_clock::now();
         result.estimation_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
         result.inlier_count = best_inliers;
-        result.inlier_mask = best_inlier_mask;
+        result.inlier_mask = best_inlier_mask_buf_;
         return result;
     }
 
@@ -364,12 +368,12 @@ PoseResult PoseEstimator::estimatePose(
     // Decompose E into R, t via cheirality check
     Eigen::Matrix3d R;
     Eigen::Vector3d t;
-    bool decomposed = decomposeEssential(E, pts1, pts2, best_inlier_mask, R, t);
+    bool decomposed = decomposeEssential(E, pts1_buf_, pts2_buf_, best_inlier_mask_buf_, R, t);
 
     auto t_end = std::chrono::high_resolution_clock::now();
     result.estimation_us = std::chrono::duration<double, std::micro>(t_end - t_start).count();
     result.inlier_count = best_inliers;
-    result.inlier_mask = best_inlier_mask;
+    result.inlier_mask = best_inlier_mask_buf_;
 
     if (decomposed) {
         result.R = R;

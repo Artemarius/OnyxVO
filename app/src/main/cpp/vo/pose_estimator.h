@@ -80,6 +80,14 @@ private:
     CameraIntrinsics K_;
     Config config_;
     std::mt19937 rng_;
+
+    // Pre-allocated buffers to avoid per-frame heap allocations
+    std::vector<Eigen::Vector2d> pts1_buf_, pts2_buf_;
+    std::vector<Eigen::Vector2d> pts1_norm_buf_, pts2_norm_buf_;
+    std::vector<Eigen::Vector2d> sample1_buf_, sample2_buf_;
+    std::vector<bool> best_inlier_mask_buf_;
+    std::vector<bool> iter_inlier_mask_buf_;
+    std::vector<int> indices_buf_;
 };
 
 } // namespace vo

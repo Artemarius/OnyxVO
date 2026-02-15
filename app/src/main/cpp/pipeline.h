@@ -8,14 +8,15 @@
 #include <vector>
 #include <Eigen/Core>
 #include <android/asset_manager.h>
+#include "feature/xfeat_extractor.h"
+#include "matching/cpu_matcher.h"
 #include "vo/trajectory.h"
 
 // Forward declarations — avoid pulling heavyweight headers into every TU
 namespace onyx {
 namespace feature {
 class XFeatExtractor;
-struct FeatureResult;
-}
+}  // FeatureResult: full definition needed (included via xfeat_extractor.h)
 namespace matching {
 class GpuMatcher;
 class CpuMatcher;
@@ -153,9 +154,18 @@ private:
     bool matcher_ready_ = false;
     bool gpu_available_ = false;
 
-    // Previous frame cache (keyframe)
-    std::unique_ptr<feature::FeatureResult> prev_features_;
-    bool has_prev_frame_ = false;
+    // Previous frame cache (keyframe) — stored inline, no per-frame allocation
+    feature::FeatureResult prev_features_storage_;
+    bool has_prev_features_valid_ = false;
+
+    // Pre-allocated frame result (reused each frame, returned by copy)
+    FrameResult frame_result_;
+
+    // Pre-allocated intermediate buffers (cleared and reused each frame)
+    std::vector<matching::Match> matches_buf_;
+    std::vector<Eigen::Vector2f> matched_pts1_buf_;
+    std::vector<Eigen::Vector2f> matched_pts2_buf_;
+    std::vector<float> displacements_buf_;
 
     // Pose estimation & trajectory
     std::unique_ptr<vo::PoseEstimator> estimator_;
