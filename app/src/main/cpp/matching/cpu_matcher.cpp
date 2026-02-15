@@ -1,5 +1,6 @@
 #include "matching/cpu_matcher.h"
 #include "utils/timer.h"
+#include <cmath>
 #include <limits>
 
 namespace onyx {
@@ -46,7 +47,8 @@ std::vector<Match> CpuMatcher::match(
             // Lowe's ratio test (on squared distances)
             if (best_idx >= 0 && second_dist > 0.0f &&
                 best_dist < ratio_sq * second_dist) {
-                matches.push_back({i, best_idx, best_dist});
+                float rq = 1.0f - std::sqrt(best_dist / second_dist);
+                matches.push_back({i, best_idx, best_dist, rq});
             }
         }
     }

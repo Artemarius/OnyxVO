@@ -10,7 +10,8 @@ namespace matching {
 struct Match {
     int idx1;
     int idx2;
-    float distance;  // L2 squared distance of best match
+    float distance;       // L2 squared distance of best match
+    float ratio_quality;  // 1.0 - sqrt(best/second), higher = more distinctive
 };
 
 class CpuMatcher {

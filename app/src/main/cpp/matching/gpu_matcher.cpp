@@ -2,6 +2,7 @@
 #include "utils/android_log.h"
 #include "utils/timer.h"
 #include "match_descriptors_comp_spv.h"
+#include <cmath>
 
 #include <kompute/Kompute.hpp>
 
@@ -154,7 +155,8 @@ std::vector<Match> GpuMatcher::match(
         for (int i = 0; i < n1; ++i) {
             if (indices[i] >= 0 && second[i] > 0.0f &&
                 distances[i] < ratio_sq * second[i]) {
-                matches.push_back({i, indices[i], distances[i]});
+                float rq = 1.0f - std::sqrt(distances[i] / second[i]);
+                matches.push_back({i, indices[i], distances[i], rq});
             }
         }
     }

@@ -8,6 +8,7 @@
 #include <vector>
 #include <Eigen/Core>
 #include <android/asset_manager.h>
+#include "vo/trajectory.h"
 
 // Forward declarations — avoid pulling heavyweight headers into every TU
 namespace onyx {
@@ -22,7 +23,6 @@ struct Match;
 }
 namespace vo {
 class PoseEstimator;
-class Trajectory;
 struct CameraIntrinsics;
 }
 }
@@ -42,14 +42,18 @@ struct FrameStats {
     int keyframe_count = 0;
     int trajectory_count = 0;
     bool budget_exceeded = false;
+    int frames_since_keyframe = 0;
+    float frame_quality_score = 0.0f;
 };
 
 // Complete per-frame output: stats + visualization data.
 struct FrameResult {
     FrameStats stats;
-    std::vector<Eigen::Vector2f> keypoints;            // current frame keypoints
-    std::vector<std::array<float, 4>> match_lines;     // [prev_x, prev_y, curr_x, curr_y]
-    std::vector<Eigen::Vector3d> trajectory_positions;
+    std::vector<Eigen::Vector2f> keypoints;              // current frame keypoints
+    std::vector<float> keypoint_scores;                  // detection scores from XFeat
+    std::vector<float> keypoint_match_info;              // 0=unmatched, +q=inlier, -q=outlier
+    std::vector<std::array<float, 6>> match_lines;       // [prev_x, prev_y, curr_x, curr_y, ratio_quality, is_inlier]
+    std::vector<vo::TrajectoryPoint> trajectory_points;
     bool pose_valid = false;
 };
 
@@ -157,6 +161,7 @@ private:
     std::unique_ptr<vo::PoseEstimator> estimator_;
     std::unique_ptr<vo::Trajectory> trajectory_;
     bool vo_initialized_ = false;
+    int frames_since_keyframe_ = 0;
 
     // Keyframe management helpers
     bool shouldUpdateKeyframe(int inlier_count, int match_count,

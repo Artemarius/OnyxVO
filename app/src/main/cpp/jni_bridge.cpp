@@ -15,7 +15,7 @@
 #include "vo/trajectory.h"
 #include "pipeline.h"
 
-#define ONYX_VO_VERSION "0.6.1-phase6"
+#define ONYX_VO_VERSION "0.7.0-phase7"
 
 namespace {
 
@@ -383,22 +383,24 @@ Java_com_onyxvo_app_NativeBridge_nativeInitMatcher(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3+4+5+6: Process frame (delegates to Pipeline)
+// Phase 3+4+5+6+7: Process frame (delegates to Pipeline)
 //
 // Returns FloatArray:
-//   [0] preprocess_us
-//   [1] inference_us
-//   [2] matching_us
-//   [3] pose_us
-//   [4] kp_count (N)
-//   [5] match_count (M)
-//   [6] inlier_count
-//   [7] keyframe_count
-//   [8] trajectory_count (T)
-//   [9] budget_exceeded (1.0 or 0.0)
-//   [10..10+2N)              keypoint coordinates (x0, y0, x1, y1, ...)
-//   [10+2N..10+2N+4M)        match lines (prev_x, prev_y, curr_x, curr_y per match)
-//   [10+2N+4M..10+2N+4M+2T)  trajectory XZ positions (x0, z0, x1, z1, ...)
+//   [0]  preprocess_us
+//   [1]  inference_us
+//   [2]  matching_us
+//   [3]  pose_us
+//   [4]  kp_count (N)
+//   [5]  match_count (M)
+//   [6]  inlier_count
+//   [7]  keyframe_count
+//   [8]  trajectory_count (T)
+//   [9]  budget_exceeded (1.0 or 0.0)
+//   [10] frames_since_keyframe
+//   [11] frame_quality_score
+//   [12..12+4N)              keypoints (x, y, score, match_info per kp)
+//   [12+4N..12+4N+6M)        match lines (prev_x, prev_y, curr_x, curr_y, ratio_quality, is_inlier)
+//   [12+4N+6M..12+4N+6M+4T)  trajectory (x, z, heading_rad, inlier_ratio per point)
 // ---------------------------------------------------------------------------
 
 JNIEXPORT jfloatArray JNICALL
@@ -427,43 +429,56 @@ Java_com_onyxvo_app_NativeBridge_nativeProcessFrame(
     int m = stats.match_count;
     int t_count = stats.trajectory_count;
 
-    // Pack result: 10-field header + keypoints + match lines + trajectory XZ
-    int result_size = 10 + n * 2 + m * 4 + t_count * 2;
+    // Pack result: 12-field header + 4N keypoints + 6M matches + 4T trajectory
+    int result_size = 12 + n * 4 + m * 6 + t_count * 4;
     jfloatArray result = env->NewFloatArray(result_size);
     if (!result) return nullptr;
 
     auto data = std::make_unique<float[]>(result_size);
-    data[0] = static_cast<float>(stats.preprocess_us);
-    data[1] = static_cast<float>(stats.inference_us);
-    data[2] = static_cast<float>(stats.matching_us);
-    data[3] = static_cast<float>(stats.pose_us);
-    data[4] = static_cast<float>(n);
-    data[5] = static_cast<float>(m);
-    data[6] = static_cast<float>(stats.inlier_count);
-    data[7] = static_cast<float>(stats.keyframe_count);
-    data[8] = static_cast<float>(t_count);
-    data[9] = stats.budget_exceeded ? 1.0f : 0.0f;
+    data[0]  = static_cast<float>(stats.preprocess_us);
+    data[1]  = static_cast<float>(stats.inference_us);
+    data[2]  = static_cast<float>(stats.matching_us);
+    data[3]  = static_cast<float>(stats.pose_us);
+    data[4]  = static_cast<float>(n);
+    data[5]  = static_cast<float>(m);
+    data[6]  = static_cast<float>(stats.inlier_count);
+    data[7]  = static_cast<float>(stats.keyframe_count);
+    data[8]  = static_cast<float>(t_count);
+    data[9]  = stats.budget_exceeded ? 1.0f : 0.0f;
+    data[10] = static_cast<float>(stats.frames_since_keyframe);
+    data[11] = stats.frame_quality_score;
 
-    // Keypoint coordinates
+    // Per-keypoint: (x, y, score, match_info)
     for (int i = 0; i < n && i < static_cast<int>(frame.keypoints.size()); ++i) {
-        data[10 + i * 2]     = frame.keypoints[i].x();
-        data[10 + i * 2 + 1] = frame.keypoints[i].y();
+        int off = 12 + i * 4;
+        data[off]     = frame.keypoints[i].x();
+        data[off + 1] = frame.keypoints[i].y();
+        data[off + 2] = (i < static_cast<int>(frame.keypoint_scores.size()))
+                       ? frame.keypoint_scores[i] : 0.0f;
+        data[off + 3] = (i < static_cast<int>(frame.keypoint_match_info.size()))
+                       ? frame.keypoint_match_info[i] : 0.0f;
     }
 
-    // Match lines: (prev_x, prev_y, curr_x, curr_y) per match
-    int match_offset = 10 + n * 2;
+    // Per-match: (prev_x, prev_y, curr_x, curr_y, ratio_quality, is_inlier)
+    int match_offset = 12 + n * 4;
     for (int i = 0; i < m && i < static_cast<int>(frame.match_lines.size()); ++i) {
-        data[match_offset + i * 4]     = frame.match_lines[i][0];
-        data[match_offset + i * 4 + 1] = frame.match_lines[i][1];
-        data[match_offset + i * 4 + 2] = frame.match_lines[i][2];
-        data[match_offset + i * 4 + 3] = frame.match_lines[i][3];
+        int off = match_offset + i * 6;
+        data[off]     = frame.match_lines[i][0];
+        data[off + 1] = frame.match_lines[i][1];
+        data[off + 2] = frame.match_lines[i][2];
+        data[off + 3] = frame.match_lines[i][3];
+        data[off + 4] = frame.match_lines[i][4];
+        data[off + 5] = frame.match_lines[i][5];
     }
 
-    // Trajectory XZ positions (top-down view: X = right, Z = forward)
-    int traj_offset = match_offset + m * 4;
-    for (int i = 0; i < t_count && i < static_cast<int>(frame.trajectory_positions.size()); ++i) {
-        data[traj_offset + i * 2]     = static_cast<float>(frame.trajectory_positions[i].x());
-        data[traj_offset + i * 2 + 1] = static_cast<float>(frame.trajectory_positions[i].z());
+    // Per-trajectory point: (x, z, heading_rad, inlier_ratio)
+    int traj_offset = match_offset + m * 6;
+    for (int i = 0; i < t_count && i < static_cast<int>(frame.trajectory_points.size()); ++i) {
+        int off = traj_offset + i * 4;
+        data[off]     = static_cast<float>(frame.trajectory_points[i].position.x());
+        data[off + 1] = static_cast<float>(frame.trajectory_points[i].position.z());
+        data[off + 2] = frame.trajectory_points[i].heading_rad;
+        data[off + 3] = frame.trajectory_points[i].inlier_ratio;
     }
 
     env->SetFloatArrayRegion(result, 0, result_size, data.get());

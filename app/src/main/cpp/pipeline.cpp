@@ -135,6 +135,16 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
     FrameResult result;
     auto frame_start = std::chrono::high_resolution_clock::now();
 
+    // Helper: populate trajectory data + keyframe counter into result
+    auto copyTrajectoryToResult = [&]() {
+        if (trajectory_) {
+            result.trajectory_points = trajectory_->points();
+            result.stats.trajectory_count = static_cast<int>(result.trajectory_points.size());
+            result.stats.keyframe_count = trajectory_->keyframeCount();
+        }
+        result.stats.frames_since_keyframe = frames_since_keyframe_;
+    };
+
     // -- Stage 1: Preprocessing (resize + normalize) --------------------------
 
     ensurePreprocessBuffers();
@@ -152,12 +162,7 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
     if (elapsedUs(frame_start) > config_.frame_budget_us) {
         result.stats.budget_exceeded = true;
         result.stats.total_us = elapsedUs(frame_start);
-        if (trajectory_) {
-            const auto& positions = trajectory_->positions();
-            result.trajectory_positions.assign(positions.begin(), positions.end());
-            result.stats.trajectory_count = static_cast<int>(positions.size());
-            result.stats.keyframe_count = trajectory_->keyframeCount();
-        }
+        copyTrajectoryToResult();
         return result;
     }
 
@@ -174,8 +179,10 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
     result.stats.inference_us = features.inference_us;
     result.stats.keypoint_count = features.count;
 
-    // Copy keypoints for visualization
+    // Copy keypoints + scores for visualization
     result.keypoints = features.keypoints;
+    result.keypoint_scores = features.scores;
+    result.keypoint_match_info.assign(features.count, 0.0f);  // all unmatched initially
 
     // Budget check after extraction
     if (elapsedUs(frame_start) > config_.frame_budget_us) {
@@ -184,12 +191,7 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
         // Still cache features for next frame
         prev_features_ = std::make_unique<feature::FeatureResult>(std::move(features));
         has_prev_frame_ = true;
-        if (trajectory_) {
-            const auto& positions = trajectory_->positions();
-            result.trajectory_positions.assign(positions.begin(), positions.end());
-            result.stats.trajectory_count = static_cast<int>(positions.size());
-            result.stats.keyframe_count = trajectory_->keyframeCount();
-        }
+        copyTrajectoryToResult();
         return result;
     }
 
@@ -216,17 +218,6 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
 
         result.stats.matching_us = match_us;
         result.stats.match_count = static_cast<int>(matches.size());
-
-        // Build match lines for visualization
-        result.match_lines.reserve(matches.size());
-        for (const auto& m : matches) {
-            result.match_lines.push_back({
-                prev_features_->keypoints[m.idx1].x(),
-                prev_features_->keypoints[m.idx1].y(),
-                features.keypoints[m.idx2].x(),
-                features.keypoints[m.idx2].y()
-            });
-        }
     }
 
     // Budget check after matching
@@ -235,16 +226,15 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
         result.stats.total_us = elapsedUs(frame_start);
         prev_features_ = std::make_unique<feature::FeatureResult>(std::move(features));
         has_prev_frame_ = true;
-        if (trajectory_) {
-            const auto& positions = trajectory_->positions();
-            result.trajectory_positions.assign(positions.begin(), positions.end());
-            result.stats.trajectory_count = static_cast<int>(positions.size());
-            result.stats.keyframe_count = trajectory_->keyframeCount();
-        }
+        copyTrajectoryToResult();
         return result;
     }
 
     // -- Stage 4: Pose estimation + trajectory --------------------------------
+
+    vo::PoseResult pose_result;
+    bool is_keyframe = false;
+    float inlier_ratio = 0.0f;
 
     if (vo_initialized_ && estimator_ && !matches.empty()) {
         // Build matched point vectors
@@ -255,39 +245,73 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
             matched_pts2[i] = features.keypoints[matches[i].idx2];
         }
 
-        auto pose_result = estimator_->estimatePose(matched_pts1, matched_pts2);
+        pose_result = estimator_->estimatePose(matched_pts1, matched_pts2);
         result.stats.pose_us = pose_result.estimation_us;
         result.stats.inlier_count = pose_result.inlier_count;
         result.pose_valid = pose_result.valid;
 
         if (pose_result.valid) {
-            trajectory_->update(pose_result.R, pose_result.t);
-            trajectory_->incrementKeyframeCount();
+            inlier_ratio = static_cast<float>(pose_result.inlier_count)
+                         / static_cast<float>(matches.size());
 
-            // Keyframe management: decide whether to keep current frame as
-            // the reference or let it be replaced by a future frame.
+            // Keyframe management
             if (shouldUpdateKeyframe(
                     pose_result.inlier_count,
                     static_cast<int>(matches.size()),
                     matched_pts1, matched_pts2,
                     pose_result.inlier_mask)) {
-                // Current frame becomes new keyframe — prev_features_ will be
-                // overwritten below after this block.
+                is_keyframe = true;
+                frames_since_keyframe_ = 0;
                 LOGI("Pipeline: keyframe updated (inliers=%d/%d)",
                      pose_result.inlier_count, static_cast<int>(matches.size()));
+            } else {
+                ++frames_since_keyframe_;
+            }
+
+            trajectory_->update(pose_result.R, pose_result.t,
+                                inlier_ratio, is_keyframe);
+            trajectory_->incrementKeyframeCount();
+        }
+    }
+
+    // -- Build enriched match lines (after pose, so we have inlier info) ------
+
+    if (!matches.empty() && prev_features_) {
+        result.match_lines.reserve(matches.size());
+        for (size_t i = 0; i < matches.size(); ++i) {
+            const auto& m = matches[i];
+            bool is_inlier = !pose_result.inlier_mask.empty()
+                           && i < pose_result.inlier_mask.size()
+                           && pose_result.inlier_mask[i];
+
+            result.match_lines.push_back({
+                prev_features_->keypoints[m.idx1].x(),
+                prev_features_->keypoints[m.idx1].y(),
+                features.keypoints[m.idx2].x(),
+                features.keypoints[m.idx2].y(),
+                m.ratio_quality,
+                is_inlier ? 1.0f : 0.0f
+            });
+
+            // Set keypoint_match_info for the current-frame keypoint
+            if (m.idx2 >= 0 && m.idx2 < static_cast<int>(result.keypoint_match_info.size())) {
+                result.keypoint_match_info[m.idx2] = is_inlier
+                    ? m.ratio_quality
+                    : -m.ratio_quality;
             }
         }
     }
 
     // -- Finalize -------------------------------------------------------------
 
-    // Copy trajectory positions for visualization
-    if (trajectory_) {
-        const auto& positions = trajectory_->positions();
-        result.trajectory_positions.assign(positions.begin(), positions.end());
-        result.stats.trajectory_count = static_cast<int>(positions.size());
-        result.stats.keyframe_count = trajectory_->keyframeCount();
-    }
+    // Compute frame quality score: 60% inlier_ratio + 40% kp_count fraction
+    float kp_frac = static_cast<float>(features.count)
+                  / static_cast<float>(std::max(config_.max_keypoints, 1));
+    kp_frac = std::min(kp_frac, 1.0f);
+    result.stats.frame_quality_score = inlier_ratio * 0.6f + kp_frac * 0.4f;
+
+    // Copy trajectory data for visualization
+    copyTrajectoryToResult();
 
     // Cache current features for next-frame matching
     prev_features_ = std::make_unique<feature::FeatureResult>(std::move(features));
@@ -374,6 +398,7 @@ void Pipeline::releaseComputeResources() {
     use_gpu_ = false;
     matcher_ready_ = false;
     vo_initialized_ = false;
+    frames_since_keyframe_ = 0;
 
     if (trajectory_) {
         trajectory_->reset();
@@ -389,6 +414,7 @@ void Pipeline::resetTrajectory() {
         trajectory_->reset();
     }
     has_prev_frame_ = false;
+    frames_since_keyframe_ = 0;
 
     LOGI("Pipeline: trajectory reset");
 }

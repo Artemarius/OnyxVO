@@ -50,7 +50,16 @@ class CameraManager(
         // Phase 6 additions
         val budgetExceeded: Boolean = false,
         // Sensor rotation (degrees CW to match display)
-        val rotationDegrees: Int = 0
+        val rotationDegrees: Int = 0,
+        // Phase 7 additions
+        val keypointScores: FloatArray = FloatArray(0),
+        val keypointMatchInfo: FloatArray = FloatArray(0),
+        val matchRatioQualities: FloatArray = FloatArray(0),
+        val matchInlierFlags: FloatArray = FloatArray(0),
+        val trajectoryHeadings: FloatArray = FloatArray(0),
+        val trajectoryInlierRatios: FloatArray = FloatArray(0),
+        val framesSinceKeyframe: Int = 0,
+        val frameQualityScore: Float = 0f
     )
 
     private val analysisExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -239,7 +248,7 @@ class CameraManager(
             yBuffer, width, height, rowStride, useNeon
         )
 
-        if (result != null && result.size >= 10) {
+        if (result != null && result.size >= 12) {
             val preprocessUs = result[0]
             val inferenceUs = result[1]
             val matchingUs = result[2]
@@ -250,32 +259,78 @@ class CameraManager(
             val keyframeCount = result[7].toInt()
             val trajectoryCount = result[8].toInt()
             val budgetExceeded = result[9] > 0.5f
+            val framesSinceKeyframe = result[10].toInt()
+            val frameQualityScore = result[11]
 
-            // Extract keypoint coordinates (packed as x0,y0,x1,y1,...)
-            val kpStart = 10
-            val kpEnd = kpStart + kpCount * 2
-            val kpCoords = if (kpCount > 0 && result.size >= kpEnd) {
-                result.copyOfRange(kpStart, kpEnd)
+            // Extract per-keypoint data (x, y, score, match_info per kp)
+            val kpStart = 12
+            val kpEnd = kpStart + kpCount * 4
+            val kpCoords: FloatArray
+            val kpScores: FloatArray
+            val kpMatchInfo: FloatArray
+            if (kpCount > 0 && result.size >= kpEnd) {
+                kpCoords = FloatArray(kpCount * 2)
+                kpScores = FloatArray(kpCount)
+                kpMatchInfo = FloatArray(kpCount)
+                for (i in 0 until kpCount) {
+                    val off = kpStart + i * 4
+                    kpCoords[i * 2] = result[off]
+                    kpCoords[i * 2 + 1] = result[off + 1]
+                    kpScores[i] = result[off + 2]
+                    kpMatchInfo[i] = result[off + 3]
+                }
             } else {
-                FloatArray(0)
+                kpCoords = FloatArray(0)
+                kpScores = FloatArray(0)
+                kpMatchInfo = FloatArray(0)
             }
 
-            // Extract match lines (packed as prev_x,prev_y,curr_x,curr_y,...)
+            // Extract per-match data (prev_x, prev_y, curr_x, curr_y, ratio_quality, is_inlier)
             val matchStart = kpEnd
-            val matchEnd = matchStart + matchCount * 4
-            val matchLines = if (matchCount > 0 && result.size >= matchEnd) {
-                result.copyOfRange(matchStart, matchEnd)
+            val matchEnd = matchStart + matchCount * 6
+            val matchLines: FloatArray
+            val matchRatioQualities: FloatArray
+            val matchInlierFlags: FloatArray
+            if (matchCount > 0 && result.size >= matchEnd) {
+                matchLines = FloatArray(matchCount * 4)
+                matchRatioQualities = FloatArray(matchCount)
+                matchInlierFlags = FloatArray(matchCount)
+                for (i in 0 until matchCount) {
+                    val off = matchStart + i * 6
+                    matchLines[i * 4] = result[off]
+                    matchLines[i * 4 + 1] = result[off + 1]
+                    matchLines[i * 4 + 2] = result[off + 2]
+                    matchLines[i * 4 + 3] = result[off + 3]
+                    matchRatioQualities[i] = result[off + 4]
+                    matchInlierFlags[i] = result[off + 5]
+                }
             } else {
-                FloatArray(0)
+                matchLines = FloatArray(0)
+                matchRatioQualities = FloatArray(0)
+                matchInlierFlags = FloatArray(0)
             }
 
-            // Extract trajectory XZ positions
+            // Extract per-trajectory data (x, z, heading_rad, inlier_ratio)
             val trajStart = matchEnd
-            val trajEnd = trajStart + trajectoryCount * 2
-            val trajectoryXZ = if (trajectoryCount > 0 && result.size >= trajEnd) {
-                result.copyOfRange(trajStart, trajEnd)
+            val trajEnd = trajStart + trajectoryCount * 4
+            val trajectoryXZ: FloatArray
+            val trajectoryHeadings: FloatArray
+            val trajectoryInlierRatios: FloatArray
+            if (trajectoryCount > 0 && result.size >= trajEnd) {
+                trajectoryXZ = FloatArray(trajectoryCount * 2)
+                trajectoryHeadings = FloatArray(trajectoryCount)
+                trajectoryInlierRatios = FloatArray(trajectoryCount)
+                for (i in 0 until trajectoryCount) {
+                    val off = trajStart + i * 4
+                    trajectoryXZ[i * 2] = result[off]
+                    trajectoryXZ[i * 2 + 1] = result[off + 1]
+                    trajectoryHeadings[i] = result[off + 2]
+                    trajectoryInlierRatios[i] = result[off + 3]
+                }
             } else {
-                FloatArray(0)
+                trajectoryXZ = FloatArray(0)
+                trajectoryHeadings = FloatArray(0)
+                trajectoryInlierRatios = FloatArray(0)
             }
 
             onFrameProcessed(
@@ -298,7 +353,15 @@ class CameraManager(
                     keyframeCount = keyframeCount,
                     trajectoryXZ = trajectoryXZ,
                     budgetExceeded = budgetExceeded,
-                    rotationDegrees = rotationDegrees
+                    rotationDegrees = rotationDegrees,
+                    keypointScores = kpScores,
+                    keypointMatchInfo = kpMatchInfo,
+                    matchRatioQualities = matchRatioQualities,
+                    matchInlierFlags = matchInlierFlags,
+                    trajectoryHeadings = trajectoryHeadings,
+                    trajectoryInlierRatios = trajectoryInlierRatios,
+                    framesSinceKeyframe = framesSinceKeyframe,
+                    frameQualityScore = frameQualityScore
                 )
             )
         }

@@ -294,8 +294,16 @@ class MainActivity : AppCompatActivity() {
 
         // Capture values needed for UI on the worker thread
         val kpCoords = result.keypointCoords
+        val kpScores = result.keypointScores
+        val kpMatchInfo = result.keypointMatchInfo
         val matchLineData = result.matchLines
+        val matchRQ = result.matchRatioQualities
+        val matchIF = result.matchInlierFlags
         val trajData = result.trajectoryXZ
+        val trajHeadings = result.trajectoryHeadings
+        val trajInlierRatios = result.trajectoryInlierRatios
+        val frameQuality = result.frameQualityScore
+        val kfAge = result.framesSinceKeyframe
         val dashData = DashboardData(
             fps = avgFps,
             preprocessUs = result.resizeTimeUs,
@@ -320,22 +328,26 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             // Trajectory view
             if (trajData.isNotEmpty()) {
-                binding.trajectoryView.updateTrajectory(trajData)
+                binding.trajectoryView.updateTrajectory(trajData, trajHeadings, trajInlierRatios)
             }
 
             // Keypoint overlay
             if (kpCoords.isNotEmpty()) {
                 binding.keypointOverlay.updateKeypoints(
-                    kpCoords, 640, 480, camW, camH, rotation
+                    kpCoords, kpScores, kpMatchInfo,
+                    640, 480, camW, camH, rotation
                 )
             }
 
             // Match lines overlay
             if (matchLineData.isNotEmpty()) {
-                binding.keypointOverlay.updateMatches(matchLineData)
+                binding.keypointOverlay.updateMatches(matchLineData, matchRQ, matchIF)
             } else {
-                binding.keypointOverlay.updateMatches(FloatArray(0))
+                binding.keypointOverlay.updateMatches(FloatArray(0), FloatArray(0), FloatArray(0))
             }
+
+            // Frame quality indicators
+            binding.keypointOverlay.updateFrameIndicators(frameQuality, kfAge)
 
             // Performance dashboard
             performanceDashboard.updateData(dashData)

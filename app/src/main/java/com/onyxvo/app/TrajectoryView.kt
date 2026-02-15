@@ -8,7 +8,10 @@ import android.graphics.Path
 import android.util.AttributeSet
 import android.view.View
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sin
 
 class TrajectoryView @JvmOverloads constructor(
     context: Context,
@@ -17,11 +20,13 @@ class TrajectoryView @JvmOverloads constructor(
 ) : View(context, attrs, defStyleAttr) {
 
     private var xzCoords = FloatArray(0)
+    private var headings = FloatArray(0)
+    private var inlierRatios = FloatArray(0)
 
-    private val pathPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
+    private val segmentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 2f
+        strokeWidth = 1f
+        strokeCap = Paint.Cap.ROUND
     }
 
     private val startPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -29,27 +34,39 @@ class TrajectoryView @JvmOverloads constructor(
         style = Paint.Style.FILL
     }
 
-    private val currentPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.RED
+    private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
         style = Paint.Style.FILL
     }
 
-    private val axisPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(60, 255, 255, 255)
+    private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(38, 255, 255, 255)  // 15% alpha
         style = Paint.Style.STROKE
         strokeWidth = 1f
     }
 
-    private val path = Path()
+    private val arrowPath = Path()
 
-    fun updateTrajectory(coords: FloatArray) {
+    fun updateTrajectory(coords: FloatArray, hdg: FloatArray, ratios: FloatArray) {
         xzCoords = coords
+        headings = hdg
+        inlierRatios = ratios
         postInvalidate()
     }
 
     fun clear() {
         xzCoords = FloatArray(0)
+        headings = FloatArray(0)
+        inlierRatios = FloatArray(0)
         postInvalidate()
+    }
+
+    // Interpolate green -> red based on inlier ratio (1.0=green, 0.0=red)
+    private fun ratioToColor(ratio: Float): Int {
+        val r = ratio.coerceIn(0f, 1f)
+        val red = ((1f - r) * 255).toInt()
+        val green = (r * 255).toInt()
+        return Color.argb(220, red, green, 60)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -59,11 +76,20 @@ class TrajectoryView @JvmOverloads constructor(
         val h = height.toFloat()
         if (w <= 0 || h <= 0) return
 
-        // Draw crosshair axes
         val cx = w / 2f
         val cy = h / 2f
-        canvas.drawLine(cx, 0f, cx, h, axisPaint)
-        canvas.drawLine(0f, cy, w, cy, axisPaint)
+
+        // Draw subtle grid (5 lines each axis)
+        val gridSpacing = min(w, h) / 6f
+        for (i in 1..5) {
+            val offset = gridSpacing * i
+            // Vertical lines
+            if (cx - offset >= 0) canvas.drawLine(cx - offset, 0f, cx - offset, h, gridPaint)
+            if (cx + offset <= w) canvas.drawLine(cx + offset, 0f, cx + offset, h, gridPaint)
+            // Horizontal lines
+            if (cy - offset >= 0) canvas.drawLine(0f, cy - offset, w, cy - offset, gridPaint)
+            if (cy + offset <= h) canvas.drawLine(0f, cy + offset, w, cy + offset, gridPaint)
+        }
 
         val count = xzCoords.size / 2
         if (count < 2) return
@@ -92,30 +118,52 @@ class TrajectoryView @JvmOverloads constructor(
         val centerX = (minX + maxX) / 2f
         val centerZ = (minZ + maxZ) / 2f
 
-        // Transform: trajectory coords -> view coords
-        // X maps to horizontal, Z maps to vertical (inverted: Z+ = forward = up on screen)
         fun toViewX(tx: Float) = cx + (tx - centerX) * scale
         fun toViewY(tz: Float) = cy - (tz - centerZ) * scale
 
-        // Draw path
-        path.reset()
-        val x0 = toViewX(xzCoords[0])
-        val y0 = toViewY(xzCoords[1])
-        path.moveTo(x0, y0)
+        // Draw path segments individually, colored by inlier ratio
         for (i in 1 until count) {
-            path.lineTo(toViewX(xzCoords[i * 2]), toViewY(xzCoords[i * 2 + 1]))
+            val x1 = toViewX(xzCoords[(i - 1) * 2])
+            val y1 = toViewY(xzCoords[(i - 1) * 2 + 1])
+            val x2 = toViewX(xzCoords[i * 2])
+            val y2 = toViewY(xzCoords[i * 2 + 1])
+
+            val ratio = if (i < inlierRatios.size) inlierRatios[i] else 0.5f
+            segmentPaint.color = ratioToColor(ratio)
+            canvas.drawLine(x1, y1, x2, y2, segmentPaint)
         }
-        canvas.drawPath(path, pathPaint)
 
         // Start dot (green)
-        canvas.drawCircle(x0, y0, 5f, startPaint)
+        val x0 = toViewX(xzCoords[0])
+        val y0 = toViewY(xzCoords[1])
+        canvas.drawCircle(x0, y0, 2.5f, startPaint)
 
-        // Current position dot (red)
+        // Heading arrow at current position
         val lastIdx = count - 1
         val xLast = toViewX(xzCoords[lastIdx * 2])
         val yLast = toViewY(xzCoords[lastIdx * 2 + 1])
-        canvas.drawCircle(xLast, yLast, 5f, currentPaint)
-    }
 
-    private fun min(a: Float, b: Float): Float = if (a < b) a else b
+        if (lastIdx < headings.size) {
+            val heading = headings[lastIdx]
+            val arrowSize = 4f
+
+            // Arrow points in heading direction (heading = atan2(forward.x, forward.z))
+            // In view space: X maps to horizontal, Z maps to vertical (inverted)
+            val dx = sin(heading) * arrowSize
+            val dy = -cos(heading) * arrowSize  // negated because Z+ is up in view
+
+            arrowPath.reset()
+            // Tip
+            arrowPath.moveTo(xLast + dx, yLast + dy)
+            // Left wing
+            arrowPath.lineTo(xLast - dy * 0.5f - dx * 0.3f, yLast + dx * 0.5f - dy * 0.3f)
+            // Right wing
+            arrowPath.lineTo(xLast + dy * 0.5f - dx * 0.3f, yLast - dx * 0.5f - dy * 0.3f)
+            arrowPath.close()
+            canvas.drawPath(arrowPath, arrowPaint)
+        } else {
+            // Fallback: white dot
+            canvas.drawCircle(xLast, yLast, 2.5f, arrowPaint)
+        }
+    }
 }
