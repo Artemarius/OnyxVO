@@ -1,6 +1,7 @@
 #include "matching/gpu_matcher.h"
 #include "utils/android_log.h"
 #include "utils/timer.h"
+#include "utils/trace.h"
 #include "match_descriptors_comp_spv.h"
 #include <cmath>
 
@@ -152,6 +153,7 @@ std::vector<Match> GpuMatcher::match(
 
         // Record and execute: sync to device -> dispatch -> sync results back
         // (uses pre-allocated input_tensors_ / output_tensors_ members)
+        ScopedTrace trace_dispatch("OnyxVO::gpu_dispatch");
 
         // Clear previous recorded ops before re-recording
         seq_->clear();

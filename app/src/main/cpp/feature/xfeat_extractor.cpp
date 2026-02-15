@@ -1,6 +1,7 @@
 #include "feature/xfeat_extractor.h"
 #include "utils/android_log.h"
 #include "utils/timer.h"
+#include "utils/trace.h"
 #include <algorithm>
 #include <android/api-level.h>
 #include <cmath>
@@ -31,8 +32,20 @@ XFeatExtractor::~XFeatExtractor() = default;
 void XFeatExtractor::loadModel(AAssetManager* asset_mgr, ModelType type, EP ep) {
     model_type_ = type;
 
-    const char* filename = (type == ModelType::FP32)
+    // Prefer pre-optimized models (baked graph fusions from optimize_onnx.py),
+    // fall back to original if optimized variant not found in assets.
+    const char* filename_opt = (type == ModelType::FP32)
+        ? "xfeat_fp32_opt.onnx" : "xfeat_int8_opt.onnx";
+    const char* filename_orig = (type == ModelType::FP32)
         ? "xfeat_fp32.onnx" : "xfeat_int8.onnx";
+
+    const char* filename = filename_opt;
+    AAsset* probe = AAssetManager_open(asset_mgr, filename_opt, AASSET_MODE_BUFFER);
+    if (probe) {
+        AAsset_close(probe);
+    } else {
+        filename = filename_orig;
+    }
 
     LOGI("Loading ONNX model: %s (EP=%s)", filename,
          ep == EP::NNAPI ? "NNAPI" : ep == EP::XNNPACK ? "XNNPACK" : "CPU");
@@ -227,6 +240,7 @@ FeatureResult XFeatExtractor::extract(const float* image, int w, int h) {
         }
 
         // Run inference
+        ScopedTrace trace_infer("OnyxVO::ort_inference");
         auto outputs = session_->Run(
             Ort::RunOptions{nullptr},
             input_name_ptrs_.data(), &input_tensor, 1,

@@ -7,6 +7,7 @@
 
 #include "utils/android_log.h"
 #include "utils/timer.h"
+#include "utils/trace.h"
 #include "preprocessing/neon_ops.h"
 #include "feature/xfeat_extractor.h"
 #include "matching/cpu_matcher.h"
@@ -198,6 +199,8 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
         return cached_result_;
     }
 
+    ScopedTrace trace_frame("OnyxVO::processFrame");
+
     // Clear reusable result — vectors keep their heap capacity from prior frames
     frame_result_.keypoints.clear();
     frame_result_.keypoint_scores.clear();
@@ -225,12 +228,16 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
 
     ensurePreprocessBuffers();
 
-    auto pp_timing = preprocessing::preprocess_frame(
-        y_plane, width, height, row_stride,
-        resize_buf_.get(), normalize_buf_.get(),
-        config_.target_width, config_.target_height,
-        config_.norm_mean, config_.norm_std,
-        use_neon);
+    preprocessing::PreprocessTiming pp_timing;
+    {
+        ScopedTrace trace_pp("OnyxVO::preprocess");
+        pp_timing = preprocessing::preprocess_frame(
+            y_plane, width, height, row_stride,
+            resize_buf_.get(), normalize_buf_.get(),
+            config_.target_width, config_.target_height,
+            config_.norm_mean, config_.norm_std,
+            use_neon);
+    }
 
     frame_result_.stats.preprocess_us = pp_timing.total_us;
 
@@ -256,8 +263,12 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
         return frame_result_;
     }
 
-    auto features = extractor_->extract(
-        normalize_buf_.get(), config_.target_width, config_.target_height);
+    feature::FeatureResult features;
+    {
+        ScopedTrace trace_ext("OnyxVO::extract");
+        features = extractor_->extract(
+            normalize_buf_.get(), config_.target_width, config_.target_height);
+    }
 
     frame_result_.stats.inference_us = features.inference_us;
     frame_result_.stats.keypoint_count = features.count;
@@ -288,6 +299,7 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
     if (matcher_ready_ && has_prev_features_valid_ &&
         features.count > 0 && prev_features_storage_.count > 0) {
 
+        ScopedTrace trace_match("OnyxVO::match");
         double match_us = 0.0;
 
         if (use_gpu_ && gpu_matcher_ && gpu_matcher_->isAvailable()) {
@@ -326,6 +338,7 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
     float inlier_ratio = 0.0f;
 
     if (vo_initialized_ && estimator_ && !matches_buf_.empty()) {
+        ScopedTrace trace_pose("OnyxVO::pose");
         // Build matched point vectors (reuse pre-allocated buffers)
         matched_pts1_buf_.resize(matches_buf_.size());
         matched_pts2_buf_.resize(matches_buf_.size());
