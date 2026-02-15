@@ -370,7 +370,7 @@ Java_com_onyxvo_app_NativeBridge_nativeValidatePreprocessing(
 JNIEXPORT jboolean JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeInitModel(
     JNIEnv* env, jobject /* thiz */,
-    jobject asset_manager, jboolean use_int8) {
+    jobject asset_manager, jboolean use_int8, jint ep_type) {
 
     auto* mgr = AAssetManager_fromJava(env, asset_manager);
     if (!mgr) {
@@ -382,7 +382,7 @@ Java_com_onyxvo_app_NativeBridge_nativeInitModel(
         return JNI_FALSE;
     }
 
-    return g_pipeline->initModel(mgr, use_int8) ? JNI_TRUE : JNI_FALSE;
+    return g_pipeline->initModel(mgr, use_int8, ep_type) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +572,7 @@ Java_com_onyxvo_app_NativeBridge_nativeSetFrameSkipEnabled(
 JNIEXPORT jboolean JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeSwitchModel(
     JNIEnv* env, jobject /* thiz */,
-    jobject asset_manager, jboolean use_int8) {
+    jobject asset_manager, jboolean use_int8, jint ep_type) {
 
     if (!g_pipeline) {
         LOGE("nativeSwitchModel: pipeline not initialized");
@@ -585,7 +585,7 @@ Java_com_onyxvo_app_NativeBridge_nativeSwitchModel(
         return JNI_FALSE;
     }
 
-    return g_pipeline->switchModel(mgr, use_int8) ? JNI_TRUE : JNI_FALSE;
+    return g_pipeline->switchModel(mgr, use_int8, ep_type) ? JNI_TRUE : JNI_FALSE;
 }
 
 // ---------------------------------------------------------------------------

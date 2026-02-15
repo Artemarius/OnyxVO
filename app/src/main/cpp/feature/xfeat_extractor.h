@@ -23,9 +23,11 @@ struct FeatureResult {
 class XFeatExtractor {
 public:
     enum class ModelType { FP32, INT8 };
+    enum class EP { CPU, XNNPACK, NNAPI };
 
     // max_keypoints: upper bound on returned keypoints (clamped from model output)
-    XFeatExtractor(AAssetManager* asset_mgr, ModelType type, int max_keypoints = 500);
+    XFeatExtractor(AAssetManager* asset_mgr, ModelType type, EP ep = EP::XNNPACK,
+                   int max_keypoints = 500);
     ~XFeatExtractor();
 
     // Run inference on preprocessed grayscale image.
@@ -34,13 +36,22 @@ public:
     FeatureResult extract(const float* image, int w, int h);
 
     // Switch between FP32 and INT8 models at runtime
-    void switchModel(AAssetManager* asset_mgr, ModelType type);
+    void switchModel(AAssetManager* asset_mgr, ModelType type, EP ep);
 
     ModelType currentModel() const { return model_type_; }
+    EP currentEP() const { return ep_; }
     const char* modelName() const { return model_type_ == ModelType::FP32 ? "FP32" : "INT8"; }
+    const char* epName() const {
+        switch (ep_) {
+            case EP::CPU: return "CPU";
+            case EP::XNNPACK: return "XNNPACK";
+            case EP::NNAPI: return "NNAPI";
+            default: return "CPU";
+        }
+    }
 
 private:
-    void loadModel(AAssetManager* asset_mgr, ModelType type);
+    void loadModel(AAssetManager* asset_mgr, ModelType type, EP ep);
 
     // Softmax + reshape keypoint logits [1,65,feat_h,feat_w] to full-res heatmap
     void buildFullResHeatmap(const float* kp_data, int feat_h, int feat_w);
@@ -65,6 +76,7 @@ private:
     std::vector<float> heatmap_full_;
 
     ModelType model_type_;
+    EP ep_;
     int max_keypoints_;
 
     // Cached input/output info

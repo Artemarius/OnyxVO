@@ -30,6 +30,7 @@ class MainActivity : AppCompatActivity() {
     private var avgMatchingUs = 0f
     private var avgPoseUs = 0f
     private var useInt8 = false
+    private var currentEp = 1 // 0=CPU, 1=XNNPACK, 2=NNAPI
     private var modelLoaded = false
     private var matcherReady = false
     private var gpuMatcherAvailable = false
@@ -86,7 +87,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             Thread {
-                val success = nativeBridge.nativeSwitchModel(assets, useInt8)
+                val success = nativeBridge.nativeSwitchModel(assets, useInt8, currentEp)
                 runOnUiThread {
                     if (success) {
                         Log.i(TAG, "Switched to ${if (useInt8) "INT8" else "FP32"}")
@@ -94,6 +95,28 @@ class MainActivity : AppCompatActivity() {
                         Log.e(TAG, "Model switch failed, reverting")
                         useInt8 = !useInt8
                         binding.toggleModelButton.text = if (useInt8) "INT8" else "FP32"
+                    }
+                }
+            }.start()
+        }
+
+        binding.toggleEpButton.setOnClickListener {
+            // Cycle: XNNPACK(1) -> NNAPI(2) -> CPU(0) -> XNNPACK(1)
+            currentEp = when (currentEp) {
+                1 -> 2
+                2 -> 0
+                else -> 1
+            }
+            val epLabel = epName(currentEp)
+            binding.toggleEpButton.text = epLabel
+
+            Thread {
+                val success = nativeBridge.nativeSwitchModel(assets, useInt8, currentEp)
+                runOnUiThread {
+                    if (success) {
+                        Log.i(TAG, "Switched EP to $epLabel")
+                    } else {
+                        Log.e(TAG, "EP switch failed")
                     }
                 }
             }.start()
@@ -205,11 +228,13 @@ class MainActivity : AppCompatActivity() {
                             Log.i(TAG, "Auto benchmark complete")
                         }
                     },
-                    onModeSwitch = { newInt8, newGpu ->
+                    onModeSwitch = { newInt8, newGpu, newEp ->
                         runOnUiThread {
                             useInt8 = newInt8
+                            currentEp = newEp
                             binding.toggleModelButton.text = if (newInt8) "INT8" else "FP32"
                             binding.toggleMatcherButton.text = if (newGpu) "GPU" else "CPU"
+                            binding.toggleEpButton.text = epName(newEp)
                         }
                     }
                 )
@@ -219,7 +244,7 @@ class MainActivity : AppCompatActivity() {
                     android.content.res.ColorStateList.valueOf(0xCCF44336.toInt())
                 binding.benchmarkResult.visibility = View.VISIBLE
                 binding.benchmarkResult.text = "Starting auto benchmark..."
-                newRunner.start(useInt8, currentUseGpu)
+                newRunner.start(useInt8, currentUseGpu, currentEp)
             } else {
                 binding.benchmarkResult.visibility = View.VISIBLE
                 binding.benchmarkResult.text = "Model not loaded yet"
@@ -266,9 +291,16 @@ class MainActivity : AppCompatActivity() {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    private fun epName(ep: Int): String = when (ep) {
+        0 -> "CPU"
+        1 -> "XNNPACK"
+        2 -> "NNAPI"
+        else -> "CPU"
+    }
+
     private fun initModel(useInt8: Boolean) {
         Thread {
-            val success = nativeBridge.nativeInitModel(assets, useInt8)
+            val success = nativeBridge.nativeInitModel(assets, useInt8, currentEp)
             modelLoaded = success
             runOnUiThread {
                 if (success) {
@@ -376,7 +408,7 @@ class MainActivity : AppCompatActivity() {
             inlierCount = result.inlierCount,
             keyframeCount = result.keyframeCount,
             budgetExceeded = result.budgetExceeded,
-            modelType = if (useInt8) "INT8" else "FP32",
+            modelType = "${if (useInt8) "INT8" else "FP32"}/${epName(currentEp)}",
             matcherType = if (binding.toggleMatcherButton.text == "GPU") "GPU" else "CPU",
             useNeon = binding.toggleNeonButton.text == "NEON"
         )

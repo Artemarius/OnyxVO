@@ -16,6 +16,17 @@
 
 namespace onyx {
 
+namespace {
+feature::XFeatExtractor::EP epFromInt(int ep_type) {
+    switch (ep_type) {
+        case 0:  return feature::XFeatExtractor::EP::CPU;
+        case 1:  return feature::XFeatExtractor::EP::XNNPACK;
+        case 2:  return feature::XFeatExtractor::EP::NNAPI;
+        default: return feature::XFeatExtractor::EP::XNNPACK;
+    }
+}
+} // anonymous namespace
+
 // ---------------------------------------------------------------------------
 // Construction / destruction
 // ---------------------------------------------------------------------------
@@ -52,19 +63,20 @@ double Pipeline::elapsedUs(std::chrono::high_resolution_clock::time_point start)
 // Initialization
 // ---------------------------------------------------------------------------
 
-bool Pipeline::initModel(AAssetManager* mgr, bool use_int8) {
+bool Pipeline::initModel(AAssetManager* mgr, bool use_int8, int ep_type) {
     std::lock_guard<std::mutex> lock(pipeline_mutex_);
 
     auto model_type = use_int8
         ? feature::XFeatExtractor::ModelType::INT8
         : feature::XFeatExtractor::ModelType::FP32;
+    auto ep = epFromInt(ep_type);
 
     try {
         extractor_ = std::make_unique<feature::XFeatExtractor>(
-            mgr, model_type, config_.max_keypoints);
+            mgr, model_type, ep, config_.max_keypoints);
         model_loaded_ = true;
         has_prev_features_valid_ = false;
-        LOGI("Pipeline: model initialized (%s)", extractor_->modelName());
+        LOGI("Pipeline: model initialized (%s/%s)", extractor_->modelName(), extractor_->epName());
         return true;
     } catch (const std::exception& e) {
         LOGE("Pipeline::initModel failed: %s", e.what());
@@ -521,7 +533,7 @@ void Pipeline::resetTrajectory() {
     LOGI("Pipeline: trajectory reset");
 }
 
-bool Pipeline::switchModel(AAssetManager* mgr, bool use_int8) {
+bool Pipeline::switchModel(AAssetManager* mgr, bool use_int8, int ep_type) {
     std::lock_guard<std::mutex> lock(pipeline_mutex_);
 
     if (!extractor_) {
@@ -532,13 +544,14 @@ bool Pipeline::switchModel(AAssetManager* mgr, bool use_int8) {
     auto model_type = use_int8
         ? feature::XFeatExtractor::ModelType::INT8
         : feature::XFeatExtractor::ModelType::FP32;
+    auto ep = epFromInt(ep_type);
 
     try {
-        extractor_->switchModel(mgr, model_type);
+        extractor_->switchModel(mgr, model_type, ep);
         // Invalidate previous frame cache — descriptor space may differ
         has_prev_features_valid_ = false;
         prev_features_storage_ = feature::FeatureResult{};
-        LOGI("Pipeline: switched to model %s", extractor_->modelName());
+        LOGI("Pipeline: switched to model %s/%s", extractor_->modelName(), extractor_->epName());
         return true;
     } catch (const std::exception& e) {
         LOGE("Pipeline::switchModel failed: %s", e.what());

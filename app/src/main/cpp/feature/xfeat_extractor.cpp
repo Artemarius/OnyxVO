@@ -2,15 +2,17 @@
 #include "utils/android_log.h"
 #include "utils/timer.h"
 #include <algorithm>
+#include <android/api-level.h>
 #include <cmath>
 #include <cstring>
+#include "nnapi_provider_factory.h"
 
 namespace onyx {
 namespace feature {
 
 XFeatExtractor::XFeatExtractor(AAssetManager* asset_mgr, ModelType type,
-                               int max_keypoints)
-    : max_keypoints_(max_keypoints)
+                               EP ep, int max_keypoints)
+    : max_keypoints_(max_keypoints), ep_(EP::CPU)
 {
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "OnyxVO");
 
@@ -21,18 +23,19 @@ XFeatExtractor::XFeatExtractor(AAssetManager* asset_mgr, ModelType type,
     candidates_buf_.reserve(4096);
     scored_buf_.reserve(4096);
 
-    loadModel(asset_mgr, type);
+    loadModel(asset_mgr, type, ep);
 }
 
 XFeatExtractor::~XFeatExtractor() = default;
 
-void XFeatExtractor::loadModel(AAssetManager* asset_mgr, ModelType type) {
+void XFeatExtractor::loadModel(AAssetManager* asset_mgr, ModelType type, EP ep) {
     model_type_ = type;
 
     const char* filename = (type == ModelType::FP32)
         ? "xfeat_fp32.onnx" : "xfeat_int8.onnx";
 
-    LOGI("Loading ONNX model: %s", filename);
+    LOGI("Loading ONNX model: %s (EP=%s)", filename,
+         ep == EP::NNAPI ? "NNAPI" : ep == EP::XNNPACK ? "XNNPACK" : "CPU");
 
     // Read asset into memory
     AAsset* asset = AAssetManager_open(asset_mgr, filename, AASSET_MODE_BUFFER);
@@ -50,24 +53,72 @@ void XFeatExtractor::loadModel(AAssetManager* asset_mgr, ModelType type) {
          static_cast<float>(model_data_.size()) / (1024.0f * 1024.0f));
 
     // Configure session options fresh for each model load.
-    // XNNPACK EP gives a large FP32 speedup but is incompatible with INT8
-    // quantized models (FusedNodeAndGraph compile failure), so we only
-    // enable it for FP32 sessions.
     session_options_ = Ort::SessionOptions{};
     session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     session_options_.SetIntraOpNumThreads(1);
     session_options_.SetInterOpNumThreads(1);
 
-    if (type == ModelType::FP32) {
+    // Track the actually-active EP (may differ from requested if fallback occurs)
+    ep_ = EP::CPU;
+
+    if (ep == EP::NNAPI) {
+        // NNAPI EP: works for both FP32 and INT8 models.
+        // NNAPI_FLAG_CPU_DISABLED avoids slow NNAPI CPU fallback (API 29+ only).
+        try {
+            uint32_t nnapi_flags = NNAPI_FLAG_USE_NONE;
+            if (android_get_device_api_level() >= 29) {
+                nnapi_flags |= NNAPI_FLAG_CPU_DISABLED;
+            }
+            OrtStatus* status = OrtSessionOptionsAppendExecutionProvider_Nnapi(
+                session_options_, nnapi_flags);
+            if (status != nullptr) {
+                const char* msg = Ort::GetApi().GetErrorMessage(status);
+                LOGW("NNAPI EP append failed: %s", msg);
+                Ort::GetApi().ReleaseStatus(status);
+                // Fall back based on model type
+                if (type == ModelType::FP32) {
+                    try {
+                        session_options_.AppendExecutionProvider("XNNPACK",
+                            {{"intra_op_num_threads", "1"}});
+                        ep_ = EP::XNNPACK;
+                        LOGI("NNAPI fallback -> XNNPACK for FP32");
+                    } catch (...) {
+                        LOGI("NNAPI fallback -> CPU (XNNPACK also unavailable)");
+                    }
+                } else {
+                    LOGI("NNAPI fallback -> CPU for INT8");
+                }
+            } else {
+                ep_ = EP::NNAPI;
+                LOGI("NNAPI execution provider enabled (flags=0x%x)", nnapi_flags);
+            }
+        } catch (const std::exception& e) {
+            LOGW("NNAPI EP exception: %s — falling back", e.what());
+            if (type == ModelType::FP32) {
+                try {
+                    session_options_.AppendExecutionProvider("XNNPACK",
+                        {{"intra_op_num_threads", "1"}});
+                    ep_ = EP::XNNPACK;
+                    LOGI("NNAPI exception fallback -> XNNPACK for FP32");
+                } catch (...) {
+                    LOGI("NNAPI exception fallback -> CPU");
+                }
+            }
+        }
+    } else if (ep == EP::XNNPACK && type == ModelType::FP32) {
+        // XNNPACK EP: FP32 only (incompatible with INT8 quantized models)
         try {
             session_options_.AppendExecutionProvider("XNNPACK",
                 {{"intra_op_num_threads", "1"}});
+            ep_ = EP::XNNPACK;
             LOGI("XNNPACK execution provider enabled for FP32 model");
         } catch (const Ort::Exception& e) {
             LOGW("XNNPACK EP not available, falling back to CPU EP: %s", e.what());
         }
+    } else if (ep == EP::XNNPACK && type == ModelType::INT8) {
+        LOGI("INT8 model: XNNPACK incompatible, using default CPU EP");
     } else {
-        LOGI("INT8 model: using default CPU EP (XNNPACK incompatible with quantized models)");
+        LOGI("Using default CPU EP");
     }
 
     // Create session from memory buffer
@@ -306,15 +357,15 @@ FeatureResult XFeatExtractor::extract(const float* image, int w, int h) {
     return result;
 }
 
-void XFeatExtractor::switchModel(AAssetManager* asset_mgr, ModelType type) {
+void XFeatExtractor::switchModel(AAssetManager* asset_mgr, ModelType type, EP ep) {
     std::lock_guard<std::mutex> lock(session_mutex_);
-    if (type == model_type_ && session_) {
-        LOGI("Model already loaded: %s", modelName());
+    if (type == model_type_ && ep == ep_ && session_) {
+        LOGI("Model already loaded: %s/%s", modelName(), epName());
         return;
     }
     session_.reset();
     model_data_.clear();
-    loadModel(asset_mgr, type);
+    loadModel(asset_mgr, type, ep);
 }
 
 void XFeatExtractor::buildFullResHeatmap(const float* kp_data, int feat_h, int feat_w) {

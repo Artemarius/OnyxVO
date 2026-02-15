@@ -20,7 +20,7 @@ class BenchmarkRunner(
     private val gpuAvailable: Boolean,
     private val onProgress: (String) -> Unit,
     private val onComplete: (String) -> Unit,
-    private val onModeSwitch: (useInt8: Boolean, useGpu: Boolean) -> Unit
+    private val onModeSwitch: (useInt8: Boolean, useGpu: Boolean, epType: Int) -> Unit
 ) {
     companion object {
         private const val TAG = "OnyxVO"
@@ -31,25 +31,33 @@ class BenchmarkRunner(
     data class ModeConfig(
         val label: String,
         val useInt8: Boolean,
-        val useGpu: Boolean
+        val useGpu: Boolean,
+        val epType: Int = 1  // 0=CPU, 1=XNNPACK, 2=NNAPI
     )
 
     private enum class Phase {
         IDLE, SWITCHING, WARMUP, MEASURING, DONE
     }
 
-    // Ordered to minimize model reloads: FP32 pair, then INT8 pair
+    // Ordered to minimize model reloads: FP32 group (XNNPACK pair, then NNAPI), then INT8 group
     private val modes: List<ModeConfig> = buildList {
-        add(ModeConfig("FP32+GPU", useInt8 = false, useGpu = true))
-        add(ModeConfig("FP32+CPU", useInt8 = false, useGpu = false))
-        add(ModeConfig("INT8+GPU", useInt8 = true, useGpu = true))
-        add(ModeConfig("INT8+CPU", useInt8 = true, useGpu = false))
+        // FP32 + XNNPACK EP
+        add(ModeConfig("FP32+XNNPACK+GPU", useInt8 = false, useGpu = true, epType = 1))
+        add(ModeConfig("FP32+XNNPACK+CPU", useInt8 = false, useGpu = false, epType = 1))
+        // FP32 + NNAPI EP (CPU matcher — NNAPI replaces XNNPACK for inference)
+        add(ModeConfig("FP32+NNAPI+CPU", useInt8 = false, useGpu = false, epType = 2))
+        // INT8 + default CPU EP
+        add(ModeConfig("INT8+CPU+GPU", useInt8 = true, useGpu = true, epType = 0))
+        add(ModeConfig("INT8+CPU+CPU", useInt8 = true, useGpu = false, epType = 0))
+        // INT8 + NNAPI EP
+        add(ModeConfig("INT8+NNAPI+CPU", useInt8 = true, useGpu = false, epType = 2))
     }.filter { !it.useGpu || gpuAvailable }
 
     private var phase = Phase.IDLE
     private var currentModeIndex = 0
     private var frameCounter = 0
     private var currentModelIsInt8 = false // tracks which model is currently loaded
+    private var currentEpType = 1 // tracks which EP is currently active
 
     // Raw timing samples for current mode (microseconds)
     private val preprocessSamples = mutableListOf<Double>()
@@ -94,13 +102,16 @@ class BenchmarkRunner(
     // Initial mode to restore after benchmark
     private var originalUseInt8 = false
     private var originalUseGpu = false
+    private var originalEpType = 1
 
-    fun start(currentUseInt8: Boolean, currentUseGpu: Boolean) {
+    fun start(currentUseInt8: Boolean, currentUseGpu: Boolean, currentEp: Int = 1) {
         if (running) return
 
         originalUseInt8 = currentUseInt8
         originalUseGpu = currentUseGpu
+        originalEpType = currentEp
         currentModelIsInt8 = currentUseInt8
+        currentEpType = currentEp
 
         running = true
         phase = Phase.IDLE
@@ -194,10 +205,10 @@ class BenchmarkRunner(
 
         Thread {
             try {
-                // Switch model if needed
-                val needModelSwitch = mode.useInt8 != currentModelIsInt8
-                if (needModelSwitch) {
-                    val success = nativeBridge.nativeSwitchModel(assetManager, mode.useInt8)
+                // Switch model/EP if needed
+                val needSwitch = mode.useInt8 != currentModelIsInt8 || mode.epType != currentEpType
+                if (needSwitch) {
+                    val success = nativeBridge.nativeSwitchModel(assetManager, mode.useInt8, mode.epType)
                     if (!success) {
                         Log.e(TAG, "BENCH: Model switch to ${mode.label} failed")
                         onProgress("ERROR: Model switch failed for ${mode.label}")
@@ -211,6 +222,7 @@ class BenchmarkRunner(
                         return@Thread
                     }
                     currentModelIsInt8 = mode.useInt8
+                    currentEpType = mode.epType
                 }
 
                 // Switch matcher
@@ -226,7 +238,7 @@ class BenchmarkRunner(
                 frameCounter = 0
                 clearSamples()
 
-                onModeSwitch(mode.useInt8, mode.useGpu)
+                onModeSwitch(mode.useInt8, mode.useGpu, mode.epType)
                 onProgress("${mode.label}: warming up ($WARMUP_FRAMES frames)")
 
             } catch (e: Exception) {
@@ -313,12 +325,13 @@ class BenchmarkRunner(
     private fun restoreOriginalMode() {
         Thread {
             try {
-                if (currentModelIsInt8 != originalUseInt8) {
-                    nativeBridge.nativeSwitchModel(assetManager, originalUseInt8)
+                if (currentModelIsInt8 != originalUseInt8 || currentEpType != originalEpType) {
+                    nativeBridge.nativeSwitchModel(assetManager, originalUseInt8, originalEpType)
                     currentModelIsInt8 = originalUseInt8
+                    currentEpType = originalEpType
                 }
                 nativeBridge.nativeSetMatcherUseGpu(originalUseGpu)
-                onModeSwitch(originalUseInt8, originalUseGpu)
+                onModeSwitch(originalUseInt8, originalUseGpu, originalEpType)
             } catch (e: Exception) {
                 Log.e(TAG, "BENCH: Failed to restore original mode", e)
             }

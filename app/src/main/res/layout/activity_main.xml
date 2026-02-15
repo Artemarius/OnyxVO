@@ -84,6 +84,23 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toBottomOf="@id/toggleNeonButton" />
 
+    <!-- Execution provider toggle (XNNPACK / NNAPI / CPU) -->
+    <Button
+        android:id="@+id/toggleEpButton"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="16dp"
+        android:backgroundTint="#CCFF5722"
+        android:minWidth="0dp"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:text="XNNPACK"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/toggleModelButton" />
+
     <!-- GPU / CPU matcher toggle -->
     <Button
         android:id="@+id/toggleMatcherButton"
@@ -100,7 +117,7 @@
         android:textSize="12sp"
         android:visibility="gone"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/toggleModelButton" />
+        app:layout_constraintTop_toBottomOf="@id/toggleEpButton" />
 
     <!-- Benchmark button -->
     <Button

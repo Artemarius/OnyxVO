@@ -39,8 +39,9 @@ class NativeBridge {
     external fun nativeValidatePreprocessing(): FloatArray?
 
     // Phase 3: Initialize XFeat model
+    // epType: 0=CPU, 1=XNNPACK, 2=NNAPI
     // Returns true on success
-    external fun nativeInitModel(assetManager: AssetManager, useInt8: Boolean): Boolean
+    external fun nativeInitModel(assetManager: AssetManager, useInt8: Boolean, epType: Int = 1): Boolean
 
     // Phase 3+4: Process frame (preprocess + feature extraction + matching)
     // Returns FloatArray [preprocess_us, inference_us, matching_us, kp_count, match_count,
@@ -53,8 +54,9 @@ class NativeBridge {
         useNeon: Boolean
     ): FloatArray?
 
-    // Phase 3: Switch between FP32 and INT8 models
-    external fun nativeSwitchModel(assetManager: AssetManager, useInt8: Boolean): Boolean
+    // Phase 3: Switch between FP32/INT8 models and/or execution provider
+    // epType: 0=CPU, 1=XNNPACK, 2=NNAPI
+    external fun nativeSwitchModel(assetManager: AssetManager, useInt8: Boolean, epType: Int = 1): Boolean
 
     // Phase 3: Inference benchmark (FP32 vs INT8)
     // Returns FloatArray [fp32_avg_us, int8_avg_us, speedup, fp32_kp_count, int8_kp_count]

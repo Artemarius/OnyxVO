@@ -111,7 +111,8 @@ public:
     // --- Initialization (call in order) ---
 
     // Load XFeat ONNX model. Returns true on success.
-    bool initModel(AAssetManager* mgr, bool use_int8);
+    // ep_type: 0=CPU, 1=XNNPACK, 2=NNAPI
+    bool initModel(AAssetManager* mgr, bool use_int8, int ep_type = 1);
 
     // Create GPU matcher (with CPU fallback). Returns true if GPU available.
     bool initMatcher();
@@ -132,7 +133,8 @@ public:
     void releaseComputeResources();
 
     void resetTrajectory();
-    bool switchModel(AAssetManager* mgr, bool use_int8);
+    // ep_type: 0=CPU, 1=XNNPACK, 2=NNAPI
+    bool switchModel(AAssetManager* mgr, bool use_int8, int ep_type = 1);
     void setUseGpu(bool use_gpu);
     void setFrameSkipEnabled(bool enabled);
 
