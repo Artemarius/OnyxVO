@@ -10,6 +10,17 @@ layout(push_constant) uniform PushConstants {
     uint n2;  // number of descriptors in set 2
 };
 
+// Descriptor dimension (fixed for XFeat: 64-dim descriptors)
+const uint DESC_DIM = 64u;
+
+// Tile size for shared memory caching of desc2 descriptors.
+// The workgroup cooperatively loads TILE_SIZE descriptors from desc2 into
+// shared memory per iteration, so each descriptor is read from global memory
+// once per workgroup instead of once per thread — reducing bandwidth by
+// a factor of WORKGROUP_SIZE (64-256x).
+// Memory: TILE_SIZE * 64 * 4 bytes = 8KB at TILE_SIZE=32.
+const uint TILE_SIZE = 32u;
+
 // Descriptor buffers: flat float arrays, 64 floats per descriptor
 layout(set = 0, binding = 0) readonly buffer Desc1 { float desc1[]; };
 layout(set = 0, binding = 1) readonly buffer Desc2 { float desc2[]; };
@@ -19,55 +30,86 @@ layout(set = 0, binding = 2) writeonly buffer MatchIndices   { int   match_indic
 layout(set = 0, binding = 3) writeonly buffer MatchDistances { float match_distances[];  };
 layout(set = 0, binding = 4) writeonly buffer SecondDists    { float second_distances[]; };
 
+// Shared memory tile for desc2 descriptors
+shared float s_desc2[TILE_SIZE * DESC_DIM];
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= n1) return;
+    uint lid = gl_LocalInvocationID.x;
 
-    uint base1 = idx * 64u;
-
-    // Cache desc1[idx] into registers — read once from global memory instead of n2 times
-    vec4 d1_cache[16];
-    for (uint k = 0u; k < 16u; ++k) {
-        uint off = base1 + k * 4u;
-        d1_cache[k] = vec4(desc1[off], desc1[off + 1u], desc1[off + 2u], desc1[off + 3u]);
+    // Cache desc1[idx] into registers — read once from global memory
+    vec4 d1_cache[16];  // 16 * vec4 = 64 floats
+    if (idx < n1) {
+        uint base1 = idx * DESC_DIM;
+        for (uint k = 0u; k < 16u; ++k) {
+            uint off = base1 + k * 4u;
+            d1_cache[k] = vec4(desc1[off], desc1[off + 1u], desc1[off + 2u], desc1[off + 3u]);
+        }
     }
 
     float best_dist   = 3.402823466e+38;  // FLT_MAX
     float second_dist = 3.402823466e+38;
     int   best_idx    = -1;
 
-    for (uint j = 0u; j < n2; ++j) {
-        uint base2 = j * 64u;
-        float dist = 0.0;
-        bool early_out = false;
+    // Process desc2 in tiles of TILE_SIZE
+    uint num_tiles = (n2 + TILE_SIZE - 1u) / TILE_SIZE;
 
-        // vec4 accumulation with dot() builtin + early termination
-        for (uint k = 0u; k < 16u; ++k) {
-            uint off = base2 + k * 4u;
-            vec4 d2 = vec4(desc2[off], desc2[off + 1u], desc2[off + 2u], desc2[off + 3u]);
-            vec4 diff = d1_cache[k] - d2;
-            dist += dot(diff, diff);
+    for (uint tile = 0u; tile < num_tiles; ++tile) {
+        uint tile_base = tile * TILE_SIZE;
+        uint tile_count = min(TILE_SIZE, n2 - tile_base);
+        uint tile_floats = tile_count * DESC_DIM;
+        uint tile_global_offset = tile_base * DESC_DIM;
 
-            // Early termination: if partial distance already exceeds second-best,
-            // this candidate cannot become best or second-best — skip remaining dims
-            if (dist >= second_dist) {
-                early_out = true;
-                break;
+        // Cooperatively load desc2 tile into shared memory.
+        // Strided pattern: adjacent threads load adjacent floats → coalesced access.
+        for (uint i = lid; i < tile_floats; i += WORKGROUP_SIZE) {
+            s_desc2[i] = desc2[tile_global_offset + i];
+        }
+
+        barrier();
+
+        // Match desc1[idx] against all descriptors in the shared memory tile
+        if (idx < n1) {
+            for (uint j = 0u; j < tile_count; ++j) {
+                uint s_base = j * DESC_DIM;
+                float dist = 0.0;
+                bool early_out = false;
+
+                // vec4 accumulation with dot() builtin + early termination
+                for (uint k = 0u; k < 16u; ++k) {
+                    uint off = s_base + k * 4u;
+                    vec4 d2 = vec4(s_desc2[off], s_desc2[off + 1u], s_desc2[off + 2u], s_desc2[off + 3u]);
+                    vec4 diff = d1_cache[k] - d2;
+                    dist += dot(diff, diff);
+
+                    // Early termination: partial distance already exceeds second-best,
+                    // this candidate cannot become best or second-best
+                    if (dist >= second_dist) {
+                        early_out = true;
+                        break;
+                    }
+                }
+
+                if (early_out) continue;
+
+                uint global_j = tile_base + j;
+                if (dist < best_dist) {
+                    second_dist = best_dist;
+                    best_dist = dist;
+                    best_idx = int(global_j);
+                } else if (dist < second_dist) {
+                    second_dist = dist;
+                }
             }
         }
 
-        if (early_out) continue;
-
-        if (dist < best_dist) {
-            second_dist = best_dist;
-            best_dist = dist;
-            best_idx = int(j);
-        } else if (dist < second_dist) {
-            second_dist = dist;
-        }
+        // Ensure all threads are done reading shared memory before next tile load
+        barrier();
     }
 
-    match_indices[idx]   = best_idx;
-    match_distances[idx] = best_dist;
-    second_distances[idx] = second_dist;
+    if (idx < n1) {
+        match_indices[idx]   = best_idx;
+        match_distances[idx] = best_dist;
+        second_distances[idx] = second_dist;
+    }
 }
