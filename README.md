@@ -224,21 +224,60 @@ Look for `OnyxVO::processFrame`, `OnyxVO::preprocess`, `OnyxVO::extract`, `OnyxV
 | [XFeat](https://github.com/verlab/accelerated_features) | CVPR 2024 | Learned feature extraction model |
 | Android NDK | 25.1 | ARM64 native compilation, NEON, Vulkan |
 
+## Performance Analysis
+
+The pipeline runs at ~12.5 FPS (80 ms/frame) against an original target of 25+ FPS. Here's where the time goes and what it would take to close the gap:
+
+```
+Frame budget breakdown (80 ms total):
+
+  Preprocessing   ███                                              0.3 ms  ( 0.4%)
+  Inference       ████████████████████████████████████████████████  59  ms  (74  %)
+  Matching        ██████████████                                   17  ms  (21  %)
+  Pose            ████                                              5  ms  ( 6  %)
+                  |---------|---------|---------|---------|---------|
+                  0        12        24        36        48       60 ms
+```
+
+Inference consumes ~74% of each frame. The non-inference pipeline (preprocessing + matching + pose) totals ~22 ms, which alone would sustain 45 FPS. The bottleneck is entirely in the XFeat backbone forward pass.
+
+### What was tried
+
+| Optimization | Result |
+|---|---|
+| XNNPACK EP (FP32) | Reduced inference from ~90 ms to ~59 ms — largest single win |
+| INT8 quantization | No speedup on Exynos 2100 (XNNPACK doesn't accelerate INT8 on this SoC) |
+| NNAPI (Exynos NPU) | NPU rejected most XFeat ops; fell back to CPU |
+| ORT graph optimization | `ORT_ENABLE_ALL` fusions applied; marginal improvement |
+| Shared memory tiling | Matching improved but matching isn't the bottleneck |
+| Adaptive frame skip | Smooths UI cadence but doesn't reduce per-frame cost |
+
+### What would close the gap
+
+Reaching 25+ FPS (40 ms budget) requires cutting inference from 59 ms to ~18 ms — a 3.3x reduction. Realistic paths:
+
+1. **Smaller backbone** — Distill XFeat to a MobileNetV3-Small or EfficientNet-Lite0 backbone. Trades keypoint quality for speed. Estimated inference: 15-25 ms.
+2. **ORT mobile format** — Convert to `.ort` flatbuffer format with pre-optimization. Eliminates session startup overhead but minimal per-frame gain (~5-10%).
+3. **Qualcomm QNN EP** — On Snapdragon 8 Gen 2+ with Hexagon DSP, QNN can accelerate the full backbone. Requires Snapdragon-specific toolchain and model compilation.
+4. **Pipelined inference** — Overlap frame N inference with frame N-1 matching/pose on separate threads. Doubles throughput at the cost of one frame latency.
+5. **Reduced resolution** — Drop from 640x480 to 320x240 input. Roughly 4x fewer backbone FLOPs. Significant keypoint quality loss.
+
+None of these were pursued because the current project demonstrates the full technical stack (NEON, ONNX Runtime, Vulkan compute, geometric VO) at a level that meets the portfolio goals. Real-time performance on constrained hardware is an engineering tradeoff, not a missing capability.
+
 ## Known Limitations
 
 - **Monocular scale ambiguity:** No absolute scale without IMU or known geometry. Trajectory shows relative motion only.
 - **Drift:** No loop closure or bundle adjustment. Trajectory drifts over extended sequences.
-- **FPS gap:** Best performance is ~12.5 FPS vs the 25+ FPS target. Inference is the bottleneck; further gains require a smaller model architecture or dedicated NPU acceleration.
 - **Lighting sensitivity:** XFeat keypoint quality degrades in low-light or motion-blurred frames.
 - **Single device tested:** Benchmarks are from Samsung Galaxy S21 (Exynos 2100) only. Performance varies across SoCs.
 
 ## Future Work
 
+- **Smaller backbone:** Distill XFeat to a lighter architecture for sub-30 ms inference
+- **Pipelined inference:** Overlap inference with matching/pose on separate threads
 - **Loop closure:** Detect revisited places and correct accumulated drift
 - **IMU fusion:** Accelerometer/gyroscope pre-integration for absolute scale and inter-frame prediction
 - **QNN EP:** Qualcomm QNN execution provider for Snapdragon DSP/NPU acceleration
-- **Multi-threaded pipeline:** Overlap inference with matching on separate threads
-- **Smaller model:** Distill XFeat to a lighter backbone for sub-30ms inference
 
 ## References
 
