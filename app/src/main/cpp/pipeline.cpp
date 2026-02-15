@@ -125,12 +125,64 @@ void Pipeline::initVO(const Config& config) {
 }
 
 // ---------------------------------------------------------------------------
+// Adaptive frame skipping
+// ---------------------------------------------------------------------------
+
+void Pipeline::updateAdaptiveSkip(double frame_total_us) {
+    // Update EMA of processing time
+    if (!ema_initialized_) {
+        processing_time_ema_us_ = frame_total_us;
+        ema_initialized_ = true;
+    } else {
+        processing_time_ema_us_ = config_.frame_skip_ema_alpha * frame_total_us
+                                + (1.0 - config_.frame_skip_ema_alpha) * processing_time_ema_us_;
+    }
+
+    const double threshold_us = config_.frame_budget_us * config_.frame_skip_budget_ratio;
+
+    if (processing_time_ema_us_ > threshold_us) {
+        // Over budget
+        consecutive_under_budget_ = 0;
+        ++consecutive_over_budget_;
+
+        if (consecutive_over_budget_ >= config_.frame_skip_up_threshold
+            && skip_interval_ < config_.frame_skip_max_interval) {
+            ++skip_interval_;
+            consecutive_over_budget_ = 0;  // reset after adjustment
+            LOGI("Pipeline: skip interval increased to %d (EMA=%.0f us, threshold=%.0f us)",
+                 skip_interval_, processing_time_ema_us_, threshold_us);
+        }
+    } else {
+        // Under budget
+        consecutive_over_budget_ = 0;
+        ++consecutive_under_budget_;
+
+        if (consecutive_under_budget_ >= config_.frame_skip_down_threshold
+            && skip_interval_ > 1) {
+            --skip_interval_;
+            consecutive_under_budget_ = 0;  // reset after adjustment
+            LOGI("Pipeline: skip interval decreased to %d (EMA=%.0f us, threshold=%.0f us)",
+                 skip_interval_, processing_time_ema_us_, threshold_us);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-frame processing
 // ---------------------------------------------------------------------------
 
 FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height,
                                     int row_stride, bool use_neon) {
     std::lock_guard<std::mutex> lock(pipeline_mutex_);
+
+    // --- Adaptive frame skipping: check if this frame should be skipped ---
+    ++frame_counter_;
+    if (skip_interval_ > 1 && (frame_counter_ % skip_interval_) != 0 && has_cached_result_) {
+        // Return cached result with skip metadata updated
+        cached_result_.stats.frame_skipped = true;
+        cached_result_.stats.skip_interval = skip_interval_;
+        return cached_result_;
+    }
 
     // Clear reusable result — vectors keep their heap capacity from prior frames
     frame_result_.keypoints.clear();
@@ -143,7 +195,7 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
 
     auto frame_start = std::chrono::high_resolution_clock::now();
 
-    // Helper: populate trajectory data + keyframe counter into result
+    // Helper: populate trajectory data + keyframe counter + skip info into result
     auto copyTrajectoryToResult = [&]() {
         if (trajectory_) {
             frame_result_.trajectory_points = trajectory_->points();
@@ -151,6 +203,8 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
             frame_result_.stats.keyframe_count = trajectory_->keyframeCount();
         }
         frame_result_.stats.frames_since_keyframe = frames_since_keyframe_;
+        frame_result_.stats.skip_interval = skip_interval_;
+        frame_result_.stats.frame_skipped = false;
     };
 
     // -- Stage 1: Preprocessing (resize + normalize) --------------------------
@@ -171,6 +225,9 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
         frame_result_.stats.budget_exceeded = true;
         frame_result_.stats.total_us = elapsedUs(frame_start);
         copyTrajectoryToResult();
+        updateAdaptiveSkip(frame_result_.stats.total_us);
+        cached_result_ = frame_result_;
+        has_cached_result_ = true;
         return frame_result_;
     }
 
@@ -178,6 +235,10 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
 
     if (!model_loaded_ || !extractor_) {
         frame_result_.stats.total_us = elapsedUs(frame_start);
+        frame_result_.stats.skip_interval = skip_interval_;
+        updateAdaptiveSkip(frame_result_.stats.total_us);
+        cached_result_ = frame_result_;
+        has_cached_result_ = true;
         return frame_result_;
     }
 
@@ -200,6 +261,9 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
         prev_features_storage_ = std::move(features);
         has_prev_features_valid_ = true;
         copyTrajectoryToResult();
+        updateAdaptiveSkip(frame_result_.stats.total_us);
+        cached_result_ = frame_result_;
+        has_cached_result_ = true;
         return frame_result_;
     }
 
@@ -235,6 +299,9 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
         prev_features_storage_ = std::move(features);
         has_prev_features_valid_ = true;
         copyTrajectoryToResult();
+        updateAdaptiveSkip(frame_result_.stats.total_us);
+        cached_result_ = frame_result_;
+        has_cached_result_ = true;
         return frame_result_;
     }
 
@@ -327,6 +394,13 @@ FrameResult Pipeline::processFrame(const uint8_t* y_plane, int width, int height
 
     frame_result_.stats.total_us = elapsedUs(frame_start);
 
+    // Update adaptive skip interval based on this frame's processing time
+    updateAdaptiveSkip(frame_result_.stats.total_us);
+
+    // Cache the result for returning during skipped frames
+    cached_result_ = frame_result_;
+    has_cached_result_ = true;
+
     return frame_result_;
 }
 
@@ -408,6 +482,15 @@ void Pipeline::releaseComputeResources() {
     vo_initialized_ = false;
     frames_since_keyframe_ = 0;
 
+    // Reset adaptive frame skipping state
+    skip_interval_ = 1;
+    frame_counter_ = 0;
+    processing_time_ema_us_ = 0.0;
+    ema_initialized_ = false;
+    consecutive_over_budget_ = 0;
+    consecutive_under_budget_ = 0;
+    has_cached_result_ = false;
+
     if (trajectory_) {
         trajectory_->reset();
     }
@@ -423,6 +506,15 @@ void Pipeline::resetTrajectory() {
     }
     has_prev_features_valid_ = false;
     frames_since_keyframe_ = 0;
+
+    // Reset adaptive frame skipping — fresh start
+    skip_interval_ = 1;
+    frame_counter_ = 0;
+    processing_time_ema_us_ = 0.0;
+    ema_initialized_ = false;
+    consecutive_over_budget_ = 0;
+    consecutive_under_budget_ = 0;
+    has_cached_result_ = false;
 
     LOGI("Pipeline: trajectory reset");
 }

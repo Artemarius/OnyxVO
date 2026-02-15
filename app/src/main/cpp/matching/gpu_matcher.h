@@ -19,11 +19,16 @@ namespace matching {
 
 class GpuMatcher {
 public:
-    explicit GpuMatcher(int max_descriptors = 600);
+    // workgroup_size must be 64, 128, or 256. Passed as a Vulkan specialization
+    // constant to the compute shader — no recompilation needed.
+    explicit GpuMatcher(int max_descriptors = 600, uint32_t workgroup_size = 256);
     ~GpuMatcher();
 
     // Returns true if Vulkan/Kompute initialized successfully
     bool isAvailable() const;
+
+    // Returns the workgroup size used by the compute shader
+    uint32_t workgroupSize() const;
 
     // Brute-force L2 matching on GPU with ratio test applied CPU-side.
     // desc1: [n1 x 64], desc2: [n2 x 64]
@@ -36,6 +41,7 @@ public:
 private:
     bool available_ = false;
     int max_desc_;
+    uint32_t workgroup_size_;
 
     std::unique_ptr<kp::Manager> manager_;
     std::shared_ptr<kp::TensorT<float>> t_desc1_;

@@ -13,8 +13,19 @@ extern int InitVulkan(void);
 namespace onyx {
 namespace matching {
 
-GpuMatcher::GpuMatcher(int max_descriptors)
-    : max_desc_(max_descriptors) {
+static bool isValidWorkgroupSize(uint32_t size) {
+    return size == 64 || size == 128 || size == 256;
+}
+
+GpuMatcher::GpuMatcher(int max_descriptors, uint32_t workgroup_size)
+    : max_desc_(max_descriptors)
+    , workgroup_size_(isValidWorkgroupSize(workgroup_size) ? workgroup_size : 256) {
+
+    if (!isValidWorkgroupSize(workgroup_size)) {
+        LOGW("GpuMatcher: invalid workgroup size %u, falling back to 256. "
+             "Valid values: 64, 128, 256", workgroup_size);
+    }
+
     try {
         // Load Vulkan function pointers via NDK wrapper before any Vulkan calls.
         // Without this, vkCreateInstance is a null pointer -> SIGSEGV.
@@ -43,6 +54,7 @@ GpuMatcher::GpuMatcher(int max_descriptors)
         t_second_distances_ = manager_->tensorT<float>(zeros_d);
 
         // Create algorithm with push constants [n1, n2] as uint32_t
+        // and specialization constant [workgroup_size] as uint32_t
         std::vector<std::shared_ptr<kp::Tensor>> tensors = {
             t_desc1_, t_desc2_,
             t_match_indices_, t_match_distances_, t_second_distances_
@@ -51,11 +63,14 @@ GpuMatcher::GpuMatcher(int max_descriptors)
         std::vector<uint32_t> push_consts = {0, 0};  // placeholder
         kp::Workgroup workgroup = {1, 1, 1};  // will be set per-dispatch
 
-        algorithm_ = manager_->algorithm<float, uint32_t>(
+        // Specialization constant id=0: workgroup local_size_x
+        std::vector<uint32_t> spec_consts = { workgroup_size_ };
+
+        algorithm_ = manager_->algorithm<uint32_t, uint32_t>(
             tensors,
             match_descriptors_comp_spv,
             workgroup,
-            std::vector<float>{},  // no specialization constants
+            spec_consts,
             push_consts
         );
 
@@ -66,7 +81,8 @@ GpuMatcher::GpuMatcher(int max_descriptors)
         output_tensors_ = { t_match_indices_, t_match_distances_, t_second_distances_ };
 
         available_ = true;
-        LOGI("GpuMatcher: initialized (max_desc=%d)", max_desc_);
+        LOGI("GpuMatcher: initialized (max_desc=%d, workgroup_size=%u)",
+             max_desc_, workgroup_size_);
     } catch (const std::exception& e) {
         LOGW("GpuMatcher: Vulkan init failed: %s — will use CPU fallback", e.what());
         available_ = false;
@@ -81,6 +97,10 @@ GpuMatcher::~GpuMatcher() {
 
 bool GpuMatcher::isAvailable() const {
     return available_;
+}
+
+uint32_t GpuMatcher::workgroupSize() const {
+    return workgroup_size_;
 }
 
 std::vector<Match> GpuMatcher::match(
@@ -126,8 +146,8 @@ std::vector<Match> GpuMatcher::match(
             static_cast<uint32_t>(n2)
         };
 
-        // Update workgroup for this dispatch
-        uint32_t wg_x = (static_cast<uint32_t>(n1) + 255u) / 256u;
+        // Update workgroup for this dispatch: ceil(n1 / workgroup_size)
+        uint32_t wg_x = (static_cast<uint32_t>(n1) + workgroup_size_ - 1u) / workgroup_size_;
         algorithm_->setWorkgroup(kp::Workgroup{wg_x, 1, 1});
 
         // Record and execute: sync to device -> dispatch -> sync results back

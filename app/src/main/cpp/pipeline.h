@@ -45,6 +45,8 @@ struct FrameStats {
     bool budget_exceeded = false;
     int frames_since_keyframe = 0;
     float frame_quality_score = 0.0f;
+    int skip_interval = 1;       // current adaptive skip interval (1 = process every frame)
+    bool frame_skipped = false;  // true if this frame was skipped (returned cached result)
 };
 
 // Complete per-frame output: stats + visualization data.
@@ -94,6 +96,13 @@ public:
         // Keyframe management
         double min_inlier_ratio = 0.5;
         double max_median_displacement = 50.0;  // pixels
+
+        // Frame skipping — adaptive skip interval based on processing time EMA
+        double frame_skip_budget_ratio = 0.8;   // trigger skip increase when EMA > budget * ratio
+        double frame_skip_ema_alpha = 0.15;     // EMA smoothing factor (0..1, higher = more responsive)
+        int frame_skip_max_interval = 3;        // maximum skip interval (1 = no skip, 3 = process 1 in 3)
+        int frame_skip_up_threshold = 5;        // consecutive over-budget frames before increasing skip
+        int frame_skip_down_threshold = 8;      // consecutive under-budget frames before decreasing skip
     };
 
     Pipeline();
@@ -181,6 +190,25 @@ private:
     double computeMedianDisplacement(const std::vector<Eigen::Vector2f>& pts1,
                                       const std::vector<Eigen::Vector2f>& pts2,
                                       const std::vector<bool>& inlier_mask);
+
+    // --- Adaptive frame skipping ---
+    //
+    // Tracks an EMA of frame processing time. When consistently over budget,
+    // increases skip_interval_ (process 1 in N frames). Hysteresis counters
+    // prevent rapid oscillation.
+    int skip_interval_ = 1;                  // current skip interval (1 = process every frame)
+    int frame_counter_ = 0;                  // monotonic counter, wraps are fine
+    double processing_time_ema_us_ = 0.0;    // exponential moving average of total_us
+    bool ema_initialized_ = false;           // first frame seeds the EMA
+    int consecutive_over_budget_ = 0;        // frames where EMA > budget threshold
+    int consecutive_under_budget_ = 0;       // frames where EMA <= budget threshold
+
+    // Cached last valid result for returning during skipped frames
+    FrameResult cached_result_;
+    bool has_cached_result_ = false;
+
+    // Update EMA and adapt skip interval after a fully processed frame.
+    void updateAdaptiveSkip(double frame_total_us);
 
     // Returns elapsed microseconds since the given start time.
     static double elapsedUs(std::chrono::high_resolution_clock::time_point start);

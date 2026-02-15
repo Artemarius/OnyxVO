@@ -14,14 +14,6 @@ XFeatExtractor::XFeatExtractor(AAssetManager* asset_mgr, ModelType type,
 {
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "OnyxVO");
 
-    // Session options: optimize graph, single thread (mobile CPU)
-    // Note: XNNPACK EP was tested but doesn't support INT8 quantized models
-    // (FusedNodeAndGraph compile failure). Default CPU EP with full graph
-    // optimization is well-tuned for ARM via ONNX Runtime's internal NEON kernels.
-    session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-    session_options_.SetIntraOpNumThreads(1);
-    session_options_.SetInterOpNumThreads(1);
-
     // Pre-allocate full-res heatmap (480*640)
     heatmap_full_.resize(480 * 640, 0.0f);
 
@@ -56,6 +48,27 @@ void XFeatExtractor::loadModel(AAssetManager* asset_mgr, ModelType type) {
 
     LOGI("Model loaded: %s (%.1f MB)", filename,
          static_cast<float>(model_data_.size()) / (1024.0f * 1024.0f));
+
+    // Configure session options fresh for each model load.
+    // XNNPACK EP gives a large FP32 speedup but is incompatible with INT8
+    // quantized models (FusedNodeAndGraph compile failure), so we only
+    // enable it for FP32 sessions.
+    session_options_ = Ort::SessionOptions{};
+    session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    session_options_.SetIntraOpNumThreads(1);
+    session_options_.SetInterOpNumThreads(1);
+
+    if (type == ModelType::FP32) {
+        try {
+            session_options_.AppendExecutionProvider("XNNPACK",
+                {{"intra_op_num_threads", "1"}});
+            LOGI("XNNPACK execution provider enabled for FP32 model");
+        } catch (const Ort::Exception& e) {
+            LOGW("XNNPACK EP not available, falling back to CPU EP: %s", e.what());
+        }
+    } else {
+        LOGI("INT8 model: using default CPU EP (XNNPACK incompatible with quantized models)");
+    }
 
     // Create session from memory buffer
     session_ = std::make_unique<Ort::Session>(

@@ -1,6 +1,9 @@
 #version 450
 
-layout(local_size_x = 256) in;
+// Workgroup size is set via Vulkan specialization constant at pipeline creation.
+// Valid values: 64, 128, 256. Default 256 if not overridden.
+layout(constant_id = 0) const uint WORKGROUP_SIZE = 256;
+layout(local_size_x_id = 0) in;
 
 layout(push_constant) uniform PushConstants {
     uint n1;  // number of descriptors in set 1
