@@ -96,6 +96,15 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            // Kompute's Vulkan NDK wrapper resolves function pointers via dlopen/dlsym.
+            // Without extraction, the .so pages inside the compressed APK lack execute
+            // permission, causing SIGSEGV in kp::Manager::createInstance().
+            useLegacyPackaging = true
+        }
+    }
+
     buildFeatures {
         viewBinding = true
     }

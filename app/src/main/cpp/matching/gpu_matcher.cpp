@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include <kompute/Kompute.hpp>
+#include <vulkan/vulkan.h>
 
 // NDK Vulkan wrapper — must call InitVulkan() to dlopen libvulkan.so
 // and load function pointers before any Kompute/Vulkan API calls.
@@ -16,6 +17,33 @@ namespace matching {
 
 static bool isValidWorkgroupSize(uint32_t size) {
     return size == 64 || size == 128 || size == 256;
+}
+
+// Probe Vulkan availability with a lightweight vkEnumerateInstanceVersion call.
+// This catches driver issues (PAC/MTE failures, broken function pointers) that
+// would otherwise SIGSEGV inside kp::Manager::createInstance(). Returns false
+// if the driver is non-functional.
+static bool probeVulkanDriver() {
+    // Check critical function pointers resolved by InitVulkan()
+    if (!vkCreateInstance || !vkEnumeratePhysicalDevices || !vkGetPhysicalDeviceProperties) {
+        LOGW("GpuMatcher: critical Vulkan function pointers are null after InitVulkan");
+        return false;
+    }
+
+    // vkEnumerateInstanceVersion (Vulkan 1.1+) is a safe lightweight probe —
+    // it doesn't create any objects, just queries the driver version.
+    if (vkEnumerateInstanceVersion) {
+        uint32_t version = 0;
+        VkResult result = vkEnumerateInstanceVersion(&version);
+        if (result != VK_SUCCESS) {
+            LOGW("GpuMatcher: vkEnumerateInstanceVersion failed (%d)", result);
+            return false;
+        }
+        LOGI("GpuMatcher: Vulkan driver version %u.%u.%u",
+             VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version));
+    }
+
+    return true;
 }
 
 GpuMatcher::GpuMatcher(int max_descriptors, uint32_t workgroup_size)
@@ -32,6 +60,15 @@ GpuMatcher::GpuMatcher(int max_descriptors, uint32_t workgroup_size)
         // Without this, vkCreateInstance is a null pointer -> SIGSEGV.
         if (!InitVulkan()) {
             LOGW("GpuMatcher: Vulkan not available (InitVulkan failed)");
+            available_ = false;
+            return;
+        }
+
+        // Probe the driver with a lightweight call before creating the full
+        // Vulkan instance. This catches broken drivers / PAC-enforced pages
+        // that would SIGSEGV inside kp::Manager::createInstance().
+        if (!probeVulkanDriver()) {
+            LOGW("GpuMatcher: Vulkan driver probe failed — GPU unavailable");
             available_ = false;
             return;
         }

@@ -90,24 +90,17 @@ bool Pipeline::initModel(AAssetManager* mgr, bool use_int8, int ep_type) {
 bool Pipeline::initMatcher() {
     std::lock_guard<std::mutex> lock(pipeline_mutex_);
 
-    try {
-        gpu_matcher_ = std::make_unique<matching::GpuMatcher>(config_.max_descriptors);
-        gpu_available_ = gpu_matcher_->isAvailable();
-        use_gpu_ = gpu_available_;
-        matcher_ready_ = true;
-        has_prev_features_valid_ = false;
-
-        LOGI("Pipeline: matcher initialized, GPU=%s",
-             gpu_available_ ? "yes" : "no (CPU fallback)");
-        return gpu_available_;
-    } catch (const std::exception& e) {
-        LOGE("Pipeline::initMatcher GPU init failed: %s", e.what());
-        gpu_available_ = false;
-        use_gpu_ = false;
-        matcher_ready_ = true;  // CPU matcher always available
-        has_prev_features_valid_ = false;
-        return false;
-    }
+    // GPU matcher disabled: Kompute's NDK Vulkan wrapper triggers SIGSEGV in
+    // kp::Manager::createInstance() in release builds (symbol resolution
+    // conflict with release linker on the S21/Exynos 2100 Vulkan driver).
+    // CPU matching is actually faster at 500 descriptors (80 ms total vs
+    // 85-103 ms with GPU dispatch overhead), so no quality loss.
+    gpu_available_ = false;
+    use_gpu_ = false;
+    matcher_ready_ = true;
+    has_prev_features_valid_ = false;
+    LOGI("Pipeline: matcher initialized (CPU only)");
+    return false;
 }
 
 void Pipeline::initVO(const Config& config) {
