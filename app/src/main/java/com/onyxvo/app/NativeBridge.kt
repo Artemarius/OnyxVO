@@ -85,6 +85,9 @@ class NativeBridge {
     // Returns FloatArray [gpu_matches, cpu_matches, mismatches, passed]
     external fun nativeValidateMatching(): FloatArray?
 
+    // Phase 6: Release heavyweight compute resources (ORT session, Vulkan) on pause
+    external fun nativePause()
+
     // Phase 6: Destroy pipeline and free all native resources
     external fun nativeDestroy()
 

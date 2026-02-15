@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
     private var modelLoaded = false
     private var matcherReady = false
     private var gpuMatcherAvailable = false
+    private var pausedState = false
 
     // FPS tracking
     private var lastFrameTime: Long = System.nanoTime()
@@ -173,6 +174,25 @@ class MainActivity : AppCompatActivity() {
             startCamera()
         } else {
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    override fun onPause() {
+        cameraManager?.pause()
+        nativeBridge.nativePause()
+        modelLoaded = false
+        matcherReady = false
+        cameraManager?.modelReady = false
+        pausedState = true
+        super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (pausedState) {
+            pausedState = false
+            cameraManager?.resume()
+            initModel(useInt8)
         }
     }
 

@@ -360,6 +360,28 @@ double Pipeline::computeMedianDisplacement(
 // Runtime controls
 // ---------------------------------------------------------------------------
 
+void Pipeline::releaseComputeResources() {
+    std::lock_guard<std::mutex> lock(pipeline_mutex_);
+
+    extractor_.reset();
+    gpu_matcher_.reset();
+    prev_features_.reset();
+    estimator_.reset();
+
+    has_prev_frame_ = false;
+    model_loaded_ = false;
+    gpu_available_ = false;
+    use_gpu_ = false;
+    matcher_ready_ = false;
+    vo_initialized_ = false;
+
+    if (trajectory_) {
+        trajectory_->reset();
+    }
+
+    LOGI("Pipeline: compute resources released (pause)");
+}
+
 void Pipeline::resetTrajectory() {
     std::lock_guard<std::mutex> lock(pipeline_mutex_);
 

@@ -112,6 +112,11 @@ public:
 
     // --- Runtime controls ---
 
+    // Release heavyweight compute resources (ORT session, Vulkan/Kompute).
+    // Called on app pause. Lightweight buffers and CPU matcher are kept.
+    // Re-init via initModel() + initMatcher() + initVO() on resume.
+    void releaseComputeResources();
+
     void resetTrajectory();
     bool switchModel(AAssetManager* mgr, bool use_int8);
     void setUseGpu(bool use_gpu);

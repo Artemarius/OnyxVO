@@ -15,7 +15,7 @@
 #include "vo/trajectory.h"
 #include "pipeline.h"
 
-#define ONYX_VO_VERSION "0.6.0-phase6"
+#define ONYX_VO_VERSION "0.6.1-phase6"
 
 namespace {
 
@@ -71,6 +71,14 @@ JNIEXPORT void JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeDestroy(JNIEnv*, jobject) {
     g_pipeline.reset();
     LOGI("Pipeline destroyed");
+}
+
+JNIEXPORT void JNICALL
+Java_com_onyxvo_app_NativeBridge_nativePause(JNIEnv*, jobject) {
+    if (g_pipeline) {
+        g_pipeline->releaseComputeResources();
+    }
+    LOGI("nativePause: compute resources released");
 }
 
 JNIEXPORT jboolean JNICALL
