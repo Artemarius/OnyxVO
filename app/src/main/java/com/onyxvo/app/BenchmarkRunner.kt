@@ -208,8 +208,8 @@ class BenchmarkRunner(
                 // Switch model/EP if needed
                 val needSwitch = mode.useInt8 != currentModelIsInt8 || mode.epType != currentEpType
                 if (needSwitch) {
-                    val success = nativeBridge.nativeSwitchModel(assetManager, mode.useInt8, mode.epType)
-                    if (!success) {
+                    val actualEp = nativeBridge.nativeSwitchModel(assetManager, mode.useInt8, mode.epType)
+                    if (actualEp < 0) {
                         Log.e(TAG, "BENCH: Model switch to ${mode.label} failed")
                         onProgress("ERROR: Model switch failed for ${mode.label}")
                         // Skip this mode

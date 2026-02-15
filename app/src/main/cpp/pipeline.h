@@ -134,7 +134,9 @@ public:
 
     void resetTrajectory();
     // ep_type: 0=CPU, 1=XNNPACK, 2=NNAPI
-    bool switchModel(AAssetManager* mgr, bool use_int8, int ep_type = 1);
+    // Returns the actual EP in use after switch (may differ from requested due to fallback),
+    // or -1 on failure.
+    int switchModel(AAssetManager* mgr, bool use_int8, int ep_type = 1);
     void setUseGpu(bool use_gpu);
     void setFrameSkipEnabled(bool enabled);
 

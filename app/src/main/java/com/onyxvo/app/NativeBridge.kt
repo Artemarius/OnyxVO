@@ -56,7 +56,8 @@ class NativeBridge {
 
     // Phase 3: Switch between FP32/INT8 models and/or execution provider
     // epType: 0=CPU, 1=XNNPACK, 2=NNAPI
-    external fun nativeSwitchModel(assetManager: AssetManager, useInt8: Boolean, epType: Int = 1): Boolean
+    // Returns actual EP in use (0/1/2) after fallback, or -1 on failure
+    external fun nativeSwitchModel(assetManager: AssetManager, useInt8: Boolean, epType: Int = 1): Int
 
     // Phase 3: Inference benchmark (FP32 vs INT8)
     // Returns FloatArray [fp32_avg_us, int8_avg_us, speedup, fp32_kp_count, int8_kp_count]

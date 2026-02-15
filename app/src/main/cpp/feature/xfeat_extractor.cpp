@@ -134,9 +134,39 @@ void XFeatExtractor::loadModel(AAssetManager* asset_mgr, ModelType type, EP ep) 
         LOGI("Using default CPU EP");
     }
 
-    // Create session from memory buffer
-    session_ = std::make_unique<Ort::Session>(
-        *env_, model_data_.data(), model_data_.size(), session_options_);
+    // Create session from memory buffer.
+    // NNAPI may append successfully but fail at session creation when the NPU
+    // rejects unsupported ops (e.g., Exynos EDEN). Catch and fall back.
+    try {
+        session_ = std::make_unique<Ort::Session>(
+            *env_, model_data_.data(), model_data_.size(), session_options_);
+    } catch (const Ort::Exception& e) {
+        if (ep_ == EP::NNAPI) {
+            LOGW("NNAPI session creation failed: %s — rebuilding with fallback", e.what());
+            session_options_ = Ort::SessionOptions{};
+            session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+            session_options_.SetIntraOpNumThreads(1);
+            session_options_.SetInterOpNumThreads(1);
+
+            ep_ = EP::CPU;
+            if (type == ModelType::FP32) {
+                try {
+                    session_options_.AppendExecutionProvider("XNNPACK",
+                        {{"intra_op_num_threads", "1"}});
+                    ep_ = EP::XNNPACK;
+                    LOGI("NNAPI session fallback -> XNNPACK for FP32");
+                } catch (...) {
+                    LOGI("NNAPI session fallback -> CPU");
+                }
+            } else {
+                LOGI("NNAPI session fallback -> CPU for INT8");
+            }
+            session_ = std::make_unique<Ort::Session>(
+                *env_, model_data_.data(), model_data_.size(), session_options_);
+        } else {
+            throw;  // Non-NNAPI failure — propagate
+        }
+    }
 
     // Cache input info
     size_t num_inputs = session_->GetInputCount();

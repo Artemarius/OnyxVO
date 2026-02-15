@@ -546,12 +546,12 @@ void Pipeline::resetTrajectory() {
     LOGI("Pipeline: trajectory reset");
 }
 
-bool Pipeline::switchModel(AAssetManager* mgr, bool use_int8, int ep_type) {
+int Pipeline::switchModel(AAssetManager* mgr, bool use_int8, int ep_type) {
     std::lock_guard<std::mutex> lock(pipeline_mutex_);
 
     if (!extractor_) {
         LOGE("Pipeline::switchModel: model not initialized");
-        return false;
+        return -1;
     }
 
     auto model_type = use_int8
@@ -564,11 +564,17 @@ bool Pipeline::switchModel(AAssetManager* mgr, bool use_int8, int ep_type) {
         // Invalidate previous frame cache — descriptor space may differ
         has_prev_features_valid_ = false;
         prev_features_storage_ = feature::FeatureResult{};
+
+        // Return the actual EP (may differ from requested due to NNAPI fallback)
+        auto actual_ep = extractor_->currentEP();
+        int actual_ep_int = (actual_ep == feature::XFeatExtractor::EP::XNNPACK) ? 1
+                          : (actual_ep == feature::XFeatExtractor::EP::NNAPI)   ? 2
+                          : 0;
         LOGI("Pipeline: switched to model %s/%s", extractor_->modelName(), extractor_->epName());
-        return true;
+        return actual_ep_int;
     } catch (const std::exception& e) {
         LOGE("Pipeline::switchModel failed: %s", e.what());
-        return false;
+        return -1;
     }
 }
 

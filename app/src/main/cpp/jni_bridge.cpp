@@ -569,23 +569,23 @@ Java_com_onyxvo_app_NativeBridge_nativeSetFrameSkipEnabled(
 // Phase 3: Switch model (FP32 / INT8) (delegates to Pipeline)
 // ---------------------------------------------------------------------------
 
-JNIEXPORT jboolean JNICALL
+JNIEXPORT jint JNICALL
 Java_com_onyxvo_app_NativeBridge_nativeSwitchModel(
     JNIEnv* env, jobject /* thiz */,
     jobject asset_manager, jboolean use_int8, jint ep_type) {
 
     if (!g_pipeline) {
         LOGE("nativeSwitchModel: pipeline not initialized");
-        return JNI_FALSE;
+        return -1;
     }
 
     auto* mgr = AAssetManager_fromJava(env, asset_manager);
     if (!mgr) {
         LOGE("nativeSwitchModel: AAssetManager_fromJava returned null");
-        return JNI_FALSE;
+        return -1;
     }
 
-    return g_pipeline->switchModel(mgr, use_int8, ep_type) ? JNI_TRUE : JNI_FALSE;
+    return g_pipeline->switchModel(mgr, use_int8, ep_type);
 }
 
 // ---------------------------------------------------------------------------
