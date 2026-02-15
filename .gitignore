@@ -51,6 +51,9 @@ PROJECT.md
 .mcp/
 *.skills
 
+# Demo source videos (GIF is committed, MP4 source is not needed)
+assets/demo/*.mp4
+
 # OS
 .DS_Store
 Thumbs.db

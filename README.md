@@ -2,6 +2,12 @@
 
 Real-time visual odometry on Android using learned features (XFeat via ONNX Runtime), Vulkan compute (Kompute) for descriptor matching, and ARM NEON SIMD for image preprocessing. Thin Kotlin UI layer, heavy C++ native core.
 
+![Demo](assets/demo/demo.gif)
+
+| Keypoint Overlay | Trajectory View | Performance Dashboard |
+|:---:|:---:|:---:|
+| ![Keypoints](assets/demo/keypoint_overlay.png) | ![Trajectory](assets/demo/trajectory_view.png) | ![Dashboard](assets/demo/performance_dashboard.png) |
+
 ## Development Status
 
 | Phase | Description | Status |
