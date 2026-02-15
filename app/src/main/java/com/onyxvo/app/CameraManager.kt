@@ -1,6 +1,7 @@
 package com.onyxvo.app
 
 import android.util.Log
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -73,12 +74,15 @@ class CameraManager(
     }
 
     private fun bindUseCases(cameraProvider: ProcessCameraProvider) {
+        // Both use cases must share the same aspect ratio so CameraX uses the
+        // same sensor crop region.  4:3 matches the 640x480 model input.
         val preview = Preview.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .build()
             .also { it.setSurfaceProvider(previewView.surfaceProvider) }
 
         val imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(android.util.Size(1920, 1080))
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also { analysis ->

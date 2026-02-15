@@ -178,4 +178,4 @@ Claude Code should implement ONE phase at a time. Do not pull in components from
 - No standalone JDK installed; using Android Studio's bundled JBR 21
 - Test device: Samsung Galaxy S21 via USB debugging
 - NDK 25.1.8937393 required for Kompute build (NDK wrapper needs `sources/third_party/vulkan/` path)
-- Project status: Phase 5 complete (pose estimation via normalized 8-point + RANSAC, trajectory accumulation, 2D trajectory view)
+- Project status: Phase 5 complete (pose estimation via normalized 8-point + RANSAC, trajectory accumulation, 2D trajectory view). XFeat backbone-only keypoint decoding uses proper SuperPoint-style softmax→NMS→top-K pipeline. Model switching is thread-safe (mutex). Preview and ImageAnalysis both use 4:3 aspect ratio for correct overlay alignment.

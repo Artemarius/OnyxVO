@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <mutex>
 #include <Eigen/Core>
 #include <onnxruntime_cxx_api.h>
 #include <android/asset_manager.h>
@@ -41,6 +42,14 @@ public:
 private:
     void loadModel(AAssetManager* asset_mgr, ModelType type);
 
+    // Softmax + reshape keypoint logits [1,65,feat_h,feat_w] to full-res heatmap
+    void buildFullResHeatmap(const float* kp_data, int feat_h, int feat_w);
+
+    // Generic bilinear interpolation on a [map_h x map_w] float map
+    static float bilinearSample(const float* map, int map_w, int map_h, float fx, float fy);
+
+    std::mutex session_mutex_;
+
     std::unique_ptr<Ort::Env> env_;
     std::unique_ptr<Ort::Session> session_;
     Ort::SessionOptions session_options_;
@@ -51,6 +60,9 @@ private:
 
     // Pre-allocated buffer for 3-channel expansion (XFeat needs RGB)
     std::vector<float> rgb_buffer_;
+
+    // Full-resolution detection heatmap (480*640), pre-allocated
+    std::vector<float> heatmap_full_;
 
     ModelType model_type_;
     int max_keypoints_;
