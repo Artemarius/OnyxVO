@@ -129,6 +129,8 @@ void Pipeline::initVO(const Config& config) {
 // ---------------------------------------------------------------------------
 
 void Pipeline::updateAdaptiveSkip(double frame_total_us) {
+    if (!frame_skip_enabled_) return;
+
     // Update EMA of processing time
     if (!ema_initialized_) {
         processing_time_ema_us_ = frame_total_us;
@@ -551,6 +553,23 @@ void Pipeline::setUseGpu(bool use_gpu) {
     use_gpu_ = use_gpu && can_use_gpu;
 
     LOGI("Pipeline: matcher mode = %s", use_gpu_ ? "GPU" : "CPU");
+}
+
+void Pipeline::setFrameSkipEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(pipeline_mutex_);
+
+    frame_skip_enabled_ = enabled;
+    if (!enabled) {
+        // Reset skip state so every frame is processed
+        skip_interval_ = 1;
+        frame_counter_ = 0;
+        processing_time_ema_us_ = 0.0;
+        ema_initialized_ = false;
+        consecutive_over_budget_ = 0;
+        consecutive_under_budget_ = 0;
+    }
+
+    LOGI("Pipeline: adaptive frame skip %s", enabled ? "enabled" : "disabled");
 }
 
 // ---------------------------------------------------------------------------

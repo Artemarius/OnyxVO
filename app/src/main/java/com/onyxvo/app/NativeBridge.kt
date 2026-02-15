@@ -77,6 +77,9 @@ class NativeBridge {
     // Phase 4: Toggle GPU/CPU matching
     external fun nativeSetMatcherUseGpu(useGpu: Boolean)
 
+    // Phase 8: Toggle adaptive frame skipping (disabled during benchmarking)
+    external fun nativeSetFrameSkipEnabled(enabled: Boolean)
+
     // Phase 4: Matching benchmark (GPU vs CPU)
     // Returns FloatArray [gpu_avg_us, cpu_avg_us, speedup, match_count]
     external fun nativeBenchmarkMatching(iterations: Int): FloatArray?

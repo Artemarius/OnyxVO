@@ -134,6 +134,7 @@ public:
     void resetTrajectory();
     bool switchModel(AAssetManager* mgr, bool use_int8);
     void setUseGpu(bool use_gpu);
+    void setFrameSkipEnabled(bool enabled);
 
     // --- Queries ---
 
@@ -206,6 +207,7 @@ private:
     // Cached last valid result for returning during skipped frames
     FrameResult cached_result_;
     bool has_cached_result_ = false;
+    bool frame_skip_enabled_ = true;
 
     // Update EMA and adapt skip interval after a fully processed frame.
     void updateAdaptiveSkip(double frame_total_us);

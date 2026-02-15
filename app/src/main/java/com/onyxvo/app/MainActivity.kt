@@ -34,6 +34,7 @@ class MainActivity : AppCompatActivity() {
     private var matcherReady = false
     private var gpuMatcherAvailable = false
     private var pausedState = false
+    private var benchmarkRunner: BenchmarkRunner? = null
 
     // FPS tracking
     private var lastFrameTime: Long = System.nanoTime()
@@ -170,6 +171,61 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        binding.autoBenchButton.setOnClickListener {
+            val runner = benchmarkRunner
+            if (runner != null && runner.running) {
+                // Cancel in-progress benchmark
+                runner.cancel()
+                benchmarkRunner = null
+                binding.autoBenchButton.text = "Auto Bench"
+                binding.autoBenchButton.backgroundTintList =
+                    android.content.res.ColorStateList.valueOf(0xCC4CAF50.toInt())
+            } else if (modelLoaded && matcherReady) {
+                // Start new benchmark
+                val currentUseGpu = binding.toggleMatcherButton.text == "GPU"
+                val newRunner = BenchmarkRunner(
+                    nativeBridge = nativeBridge,
+                    assetManager = assets,
+                    outputDir = getExternalFilesDir(null) ?: filesDir,
+                    gpuAvailable = gpuMatcherAvailable,
+                    onProgress = { msg ->
+                        runOnUiThread {
+                            binding.benchmarkResult.visibility = View.VISIBLE
+                            binding.benchmarkResult.text = msg
+                        }
+                    },
+                    onComplete = { markdown ->
+                        runOnUiThread {
+                            benchmarkRunner = null
+                            binding.autoBenchButton.text = "Auto Bench"
+                            binding.autoBenchButton.backgroundTintList =
+                                android.content.res.ColorStateList.valueOf(0xCC4CAF50.toInt())
+                            binding.benchmarkResult.visibility = View.VISIBLE
+                            binding.benchmarkResult.text = "Benchmark complete!\nResults saved to onyxvo_benchmark.md"
+                            Log.i(TAG, "Auto benchmark complete")
+                        }
+                    },
+                    onModeSwitch = { newInt8, newGpu ->
+                        runOnUiThread {
+                            useInt8 = newInt8
+                            binding.toggleModelButton.text = if (newInt8) "INT8" else "FP32"
+                            binding.toggleMatcherButton.text = if (newGpu) "GPU" else "CPU"
+                        }
+                    }
+                )
+                benchmarkRunner = newRunner
+                binding.autoBenchButton.text = "Cancel"
+                binding.autoBenchButton.backgroundTintList =
+                    android.content.res.ColorStateList.valueOf(0xCCF44336.toInt())
+                binding.benchmarkResult.visibility = View.VISIBLE
+                binding.benchmarkResult.text = "Starting auto benchmark..."
+                newRunner.start(useInt8, currentUseGpu)
+            } else {
+                binding.benchmarkResult.visibility = View.VISIBLE
+                binding.benchmarkResult.text = "Model not loaded yet"
+            }
+        }
+
         if (hasCameraPermission()) {
             startCamera()
         } else {
@@ -178,6 +234,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        benchmarkRunner?.cancel()
+        benchmarkRunner = null
         cameraManager?.pause()
         nativeBridge.nativePause()
         modelLoaded = false
@@ -263,6 +321,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onFrameProcessed(result: CameraManager.FrameResult) {
+        benchmarkRunner?.onFrame(result)
+
         frameCount++
 
         // Exponential moving average for smooth display

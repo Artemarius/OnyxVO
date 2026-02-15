@@ -119,6 +119,23 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toBottomOf="@id/toggleMatcherButton" />
 
+    <!-- Auto Bench button (cycles all 4 modes) -->
+    <Button
+        android:id="@+id/autoBenchButton"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="16dp"
+        android:backgroundTint="#CC4CAF50"
+        android:minWidth="0dp"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:text="Auto Bench"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/benchmarkButton" />
+
     <!-- Reset trajectory button -->
     <Button
         android:id="@+id/resetButton"
@@ -134,7 +151,7 @@
         android:textColor="@android:color/white"
         android:textSize="12sp"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/benchmarkButton" />
+        app:layout_constraintTop_toBottomOf="@id/autoBenchButton" />
 
     <!-- Trajectory view (top-down 2D path) -->
     <com.onyxvo.app.TrajectoryView

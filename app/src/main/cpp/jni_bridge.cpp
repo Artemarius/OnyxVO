@@ -550,6 +550,22 @@ Java_com_onyxvo_app_NativeBridge_nativeSetMatcherUseGpu(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 8: Toggle adaptive frame skipping (for benchmarking)
+// ---------------------------------------------------------------------------
+
+JNIEXPORT void JNICALL
+Java_com_onyxvo_app_NativeBridge_nativeSetFrameSkipEnabled(
+    JNIEnv* /* env */, jobject /* thiz */, jboolean enabled) {
+
+    if (!g_pipeline) {
+        LOGW("nativeSetFrameSkipEnabled: pipeline not initialized");
+        return;
+    }
+
+    g_pipeline->setFrameSkipEnabled(enabled);
+}
+
+// ---------------------------------------------------------------------------
 // Phase 3: Switch model (FP32 / INT8) (delegates to Pipeline)
 // ---------------------------------------------------------------------------
 
