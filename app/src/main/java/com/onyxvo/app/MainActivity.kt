@@ -72,6 +72,7 @@ class MainActivity : AppCompatActivity() {
 
         // Initialize model with default settings (INT8 + CPU matcher = fastest)
         binding.toggleModelButton.text = if (useInt8) "INT8" else "FP32"
+        binding.toggleEpButton.text = epName(currentEp)
         initModel(useInt8)
 
         binding.toggleNeonButton.setOnClickListener {
@@ -110,15 +111,16 @@ class MainActivity : AppCompatActivity() {
                 2 -> 0
                 else -> 1
             }
+            // Update button immediately to show user preference (not actual EP)
+            currentEp = requestedEp
+            binding.toggleEpButton.text = epName(currentEp)
 
             Thread {
                 val actualEp = nativeBridge.nativeSwitchModel(assets, useInt8, requestedEp)
                 runOnUiThread {
                     if (actualEp >= 0) {
-                        currentEp = actualEp
                         activeEp = actualEp
-                        binding.toggleEpButton.text = epName(currentEp)
-                        Log.i(TAG, "Switched EP to ${epName(currentEp)}")
+                        Log.i(TAG, "EP preference=${epName(currentEp)}, actual=${epName(actualEp)}")
                     } else {
                         Log.e(TAG, "EP switch failed")
                     }
@@ -126,14 +128,14 @@ class MainActivity : AppCompatActivity() {
             }.start()
         }
 
+        // GPU matcher toggle: shown only when GPU is actually available.
+        // CPU is faster at 500 descriptors, so GPU is hidden by default;
+        // initMatcher() will show it if Vulkan init succeeds.
+        binding.toggleMatcherButton.visibility = View.GONE
         binding.toggleMatcherButton.setOnClickListener {
-            if (!matcherReady) return@setOnClickListener
-            val currentlyGpu = binding.toggleMatcherButton.text == "GPU"
-            val newUseGpu = !currentlyGpu
-            // Only allow GPU if it's available
-            val effectiveGpu = newUseGpu && gpuMatcherAvailable
-            nativeBridge.nativeSetMatcherUseGpu(effectiveGpu)
-            binding.toggleMatcherButton.text = if (effectiveGpu) "GPU" else "CPU"
+            val useGpu = binding.toggleMatcherButton.text != "GPU"
+            nativeBridge.nativeSetMatcherUseGpu(useGpu)
+            binding.toggleMatcherButton.text = if (useGpu) "GPU" else "CPU"
         }
 
         binding.resetButton.setOnClickListener {
@@ -335,14 +337,16 @@ class MainActivity : AppCompatActivity() {
             Log.i(TAG, "Matcher initialized: GPU=${if (gpuMatcherAvailable) "yes" else "no"}, defaulting to CPU")
             runOnUiThread {
                 binding.toggleMatcherButton.text = "CPU"
-                binding.toggleMatcherButton.visibility = View.VISIBLE
+                // Only show GPU/CPU toggle if GPU is actually available
+                binding.toggleMatcherButton.visibility =
+                    if (gpuMatcherAvailable) View.VISIBLE else View.GONE
             }
         } catch (e: Exception) {
             Log.e(TAG, "Matcher init failed: ${e.message}")
             matcherReady = true  // CPU fallback always works
             runOnUiThread {
                 binding.toggleMatcherButton.text = "CPU"
-                binding.toggleMatcherButton.visibility = View.VISIBLE
+                binding.toggleMatcherButton.visibility = View.GONE
             }
         }
     }

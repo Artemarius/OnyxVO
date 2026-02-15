@@ -4,6 +4,8 @@
 #include "utils/trace.h"
 #include "match_descriptors_comp_spv.h"
 #include <cmath>
+#include <csignal>
+#include <csetjmp>
 
 #include <kompute/Kompute.hpp>
 #include <vulkan/vulkan.h>
@@ -19,19 +21,34 @@ static bool isValidWorkgroupSize(uint32_t size) {
     return size == 64 || size == 128 || size == 256;
 }
 
-// Probe Vulkan availability with a lightweight vkEnumerateInstanceVersion call.
-// This catches driver issues (PAC/MTE failures, broken function pointers) that
-// would otherwise SIGSEGV inside kp::Manager::createInstance(). Returns false
-// if the driver is non-functional.
+// ---------------------------------------------------------------------------
+// Safe Vulkan probe with SIGSEGV recovery
+// ---------------------------------------------------------------------------
+// Some Android GPU drivers (e.g., Exynos 2100 / Mali-G78) can SIGSEGV
+// inside vkCreateInstance() in certain configurations. Since SIGSEGV
+// bypasses C++ exceptions, we use sigsetjmp/siglongjmp to recover.
+
+static sigjmp_buf s_probe_jmp;
+static volatile sig_atomic_t s_probe_active = 0;
+
+static void probeSignalHandler(int sig) {
+    if (s_probe_active) {
+        s_probe_active = 0;
+        siglongjmp(s_probe_jmp, 1);
+    }
+    // Not our probe — restore default and re-raise
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+// Check basic Vulkan availability (function pointers + driver version).
 static bool probeVulkanDriver() {
-    // Check critical function pointers resolved by InitVulkan()
-    if (!vkCreateInstance || !vkEnumeratePhysicalDevices || !vkGetPhysicalDeviceProperties) {
+    if (!vkCreateInstance || !vkDestroyInstance ||
+        !vkEnumeratePhysicalDevices || !vkGetPhysicalDeviceProperties) {
         LOGW("GpuMatcher: critical Vulkan function pointers are null after InitVulkan");
         return false;
     }
 
-    // vkEnumerateInstanceVersion (Vulkan 1.1+) is a safe lightweight probe —
-    // it doesn't create any objects, just queries the driver version.
     if (vkEnumerateInstanceVersion) {
         uint32_t version = 0;
         VkResult result = vkEnumerateInstanceVersion(&version);
@@ -40,10 +57,41 @@ static bool probeVulkanDriver() {
             return false;
         }
         LOGI("GpuMatcher: Vulkan driver version %u.%u.%u",
-             VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version), VK_VERSION_PATCH(version));
+             VK_VERSION_MAJOR(version), VK_VERSION_MINOR(version),
+             VK_VERSION_PATCH(version));
+    }
+    return true;
+}
+
+// Try to create a kp::Manager with SIGSEGV recovery.
+// Kompute's vulkan.hpp DispatchLoaderStatic can SIGSEGV on some Android
+// devices due to the NDK wrapper's function pointer variables being called
+// as direct branches instead of indirect calls. Returns nullptr on failure.
+static std::unique_ptr<kp::Manager> createManagerSafe() {
+    struct sigaction sa{}, old_sa{};
+    sa.sa_handler = probeSignalHandler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, &old_sa) != 0) {
+        LOGW("GpuMatcher: sigaction failed, cannot protect Kompute init");
+        return nullptr;
     }
 
-    return true;
+    std::unique_ptr<kp::Manager> mgr;
+    s_probe_active = 1;
+    if (sigsetjmp(s_probe_jmp, 1) == 0) {
+        // Normal path — may SIGSEGV inside kp::Manager::createInstance()
+        mgr = std::make_unique<kp::Manager>();
+        s_probe_active = 0;
+        LOGI("GpuMatcher: kp::Manager created successfully");
+    } else {
+        // Caught SIGSEGV from Kompute's Vulkan dispatch
+        LOGW("GpuMatcher: kp::Manager SIGSEGV caught — GPU unavailable");
+        mgr = nullptr;
+    }
+
+    sigaction(SIGSEGV, &old_sa, nullptr);
+    return mgr;
 }
 
 GpuMatcher::GpuMatcher(int max_descriptors, uint32_t workgroup_size)
@@ -73,7 +121,12 @@ GpuMatcher::GpuMatcher(int max_descriptors, uint32_t workgroup_size)
             return;
         }
 
-        manager_ = std::make_unique<kp::Manager>();
+        manager_ = createManagerSafe();
+        if (!manager_) {
+            LOGW("GpuMatcher: kp::Manager creation failed — GPU unavailable");
+            available_ = false;
+            return;
+        }
 
         auto props = manager_->getDeviceProperties();
         LOGI("GpuMatcher: Vulkan device: %s", props.deviceName);
